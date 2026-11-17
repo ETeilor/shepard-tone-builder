@@ -1,0 +1,73 @@
+name: macOS installer (AU + VST3 + app)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libasound2-dev libxrandr-dev libxinerama-dev libxcursor-dev libfontconfig1-dev libgl1-mesa-dev libxext-dev libfreetype-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTB_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build -j4 --target stb_tests StbPluginTests
+      - name: Core tests
+        run: build/stb_tests
+      - name: Plug-in tests (state, MIDI file, audition, editor snapshots)
+        run: xvfb-run -a build/StbPluginTests_artefacts/Release/StbPluginTests shots
+      - uses: actions/upload-artifact@v4
+        with:
+          name: editor-snapshots
+          path: shots/*.png
+
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (universal arm64 + x86_64)
+        run: cmake -S . -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+
+      - name: Build
+        run: cmake --build build --config Release --target shepard_cli stb_tests ShepardToneBuilder_AU ShepardToneBuilder_VST3 ShepardToneBuilder_Standalone
+
+      - name: Core tests
+        run: build/Release/stb_tests
+
+      - name: Validate the Audio Unit with auval
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "build/ShepardToneBuilder_artefacts/Release/AU/Shepard Tone Builder.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aumu Shpd Tlrm
+
+      - name: Installer (.pkg and .dmg)
+        run: bash scripts/make_installer.sh 0.1.0
+
+      - name: Install the package the way a user does and validate the installed AU
+        run: |
+          rm -rf ~/Library/Audio/Plug-Ins/Components/"Shepard Tone Builder.component"
+          PKG=$(ls dist/*.pkg)
+          # mark the package as downloaded from the internet, like a browser does
+          xattr -w com.apple.quarantine "0081;$(printf %x $(date +%s));Safari;$(uuidgen)" "$PKG"
+          sudo installer -pkg "$PKG" -target /
+          C="/Library/Audio/Plug-Ins/Components/Shepard Tone Builder.component"
+          echo "attributes after install:"; xattr -l "$C" || true
+          codesign -dv "$C" 2>&1 | head -5
+          echo "minimum macOS of the binary:"; vtool -show-build "$C/Contents/MacOS/Shepard Tone Builder" | grep -E "minos|platform"
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aumu Shpd Tlrm
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShepardToneBuilder-macOS
+          path: dist/*
