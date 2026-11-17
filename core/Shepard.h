@@ -45,7 +45,8 @@ enum Output { outSingle, outRegister, outOctave, outNumModes };
 enum BellShape { bellCosine, bellGauss, bellNumShapes };
 // layoutChord: at every step all octaves of the pitch sound together (the notes are placed on tracks by `output`).
 // layoutVoices: one track per octave voice, each a single rising line; the bell is a continuous controller curve.
-enum Layout { layoutChord, layoutVoices, layoutNumModes };
+// layoutGliss: one long note per voice and run, the pitch wheel carries the rise (needs a bend range of 12 * voices / 2 or more).
+enum Layout { layoutChord, layoutVoices, layoutGliss, layoutNumModes };
 enum Control { ctlVelocity, ctlCc1, ctlCc11, ctlNumModes };
 
 struct TonalSettings {
@@ -75,9 +76,14 @@ struct TonalSettings {
     int stepTicks = 240;            // step length when cycles == 0
     int layout = layoutChord;
     int control = ctlVelocity;      // voices layout: the bell goes to CC1 or CC11 (velocity = notes keep their own velocity)
-    bool glide = true;              // legato voices: pitch bend hides the step changes (needs a bend range on the instrument)
+    bool stagger = false;           // voice lines: voice k changes its note k/N of a step later, so the changes do not fall on one tick
+    int humTime = 0;                // voice lines: random start shift of every note, +- ticks
+    int humVel = 0;                 // voice lines: random velocity shift, +-
+    double taperOct = 0.0;          // voice lines: the bell is closed to zero over this many octaves at both ends of the range
+    double tiltDb = 0.0;            // voice lines: higher notes are quieter by this many dB per octave
+    bool glide = true;              // legato voice lines: the pitch bend rises over a run of notes and falls back at the wrap
     double bendRange = 0.5;         // semitones the instrument bends for a full pitch wheel throw
-    int glideShare = 100;           // glide width in percent of one step
+    int glideShare = 100;           // legato voice lines: depth of the pitch ramp over a run, percent of the bend range
     bool edgeFade = true;           // CC1 control: CC11 closes the voice at the edges of the range so the wrap is silent
 };
 

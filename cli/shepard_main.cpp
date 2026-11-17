@@ -44,14 +44,16 @@ int main(int argc, char** argv) {
         s.registerTracks = (int)num("regtracks", 3);
         s.cc11 = num("cc11", 0) != 0; s.ccVelocity = (int)num("ccvel", 96);
         s.lengthBars = (int)num("bars", 8); s.cycles = (int)num("cycles", 2); s.stepTicks = (int)num("step", 240);
-        s.layout = str("layout", "chord") == "voices" ? layoutVoices : layoutChord;
+        { const std::string l = str("layout", "chord"); s.layout = l == "voices" ? layoutVoices : l == "gliss" ? layoutGliss : layoutChord; }
+        s.stagger = num("stagger", 0) != 0; s.humTime = (int)num("humt", 0); s.humVel = (int)num("humv", 0);
+        s.taperOct = num("taper", 0); s.tiltDb = num("tilt", 0);
         const std::string ct = str("control", "vel");
         s.control = ct == "cc1" ? ctlCc1 : ct == "cc11" ? ctlCc11 : ctlVelocity;
         s.edgeFade = num("edge", 1) != 0;
         s.glide = num("glide", 1) != 0;
         s.bendRange = num("bend", 0.5);
         s.glideShare = (int)num("share", 100);
-        if (s.layout == layoutVoices && num("whole", 1) != 0) s.lengthBars = tonalWholeCycleBars(s, tr, s.lengthBars);
+        if (s.layout != layoutChord && num("whole", 1) != 0) s.lengthBars = tonalWholeCycleBars(s, tr, s.lengthBars);
         sc = buildTonal(s, tr);
     } else if (mode == "tempo") {
         TempoSettings s;

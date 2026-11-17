@@ -260,8 +260,8 @@ StbEditor::StbEditor(StbProcessor& p)
     tab(tabTempo, "Ритмический", 1, "Бесконечное ускорение или замедление: слои одного ритма и огибающая громкости, темп проекта не меняется");
 
     // ================= tonal, main
-    addCombo("Профиль", "t_profile", {"Синтезатор (velocity)", "Струнные легато, CC1", "Струнные легато, CC11", "Свой"}, 1,
-             "Готовые настройки. Струнные: по одному треку на голос, колокол громкости идёт контроллером (CC1 колесо модуляции, CC11 экспрессия). Синтезатор: аккорд октав на шаг, громкость velocity. Правка скрытых параметров переключает на «Свой».");
+    addCombo("Профиль", "t_profile", {"Синтезатор (velocity)", "Струнные легато, CC1", "Струнные легато, CC11", "Синтезатор, глиссандо", "Свой"}, 1,
+             "Готовые настройки. Струнные: по одному треку на голос, колокол громкости идёт контроллером (CC1 колесо модуляции, CC11 экспрессия). Синтезатор: аккорд октав на шаг, громкость velocity. Синтезатор, глиссандо: длинные ноты, высоту ведёт питчбенд (в синте диапазон бенда 24), громкость CC11. Правка скрытых параметров переключает на «Свой».");
     addCombo("Направление", "t_dir", {"Вверх", "Вниз"}, 1, "Куда уходит высота");
     addCombo("Звукоряд", "t_set", {"Хроматика", "Целотонный", "Уменьшённый (тон-полутон)", "Мажорная пентатоника", "Минорная пентатоника", "Мажор", "Минор", "Дорийский", "Миксолидийский"}, 1, "Из каких ступеней строится лестница");
     addSlider("Тоника", "t_tonic", 1, U("Ступень, с которой начинается цикл. Для хроматики ничего не меняет"));
@@ -279,7 +279,7 @@ StbEditor::StbEditor(StbProcessor& p)
     rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("авто") : noteName((int)v); };
     addCombo("Форма колокола", "t_shape", {"Косинус", "Гаусс"}, 1, "Как громкость падает к краям диапазона");
     rows.getLast()->group = 1;
-    addCombo("Раскладка", "t_layout", {"Аккорд на шаг", "Линии по голосам"}, 1, "Линии по голосам: трек на голос, плавная громкость контроллером. Аккорд на шаг: все октавы одним треком");
+    addCombo("Раскладка", "t_layout", {"Аккорд на шаг", "Линии по голосам", "Глиссандо"}, 1, "Линии по голосам: трек на голос, плавная громкость контроллером. Аккорд на шаг: все октавы одним треком. Глиссандо: одна длинная нота на пробег, высоту ведёт питчбенд. Нужен синтезатор с диапазоном бенда 24 (число голосов = диапазон бенда / 6). «Шаг лестницы» тогда это полутонов за шаг");
     rows.getLast()->group = 1;
     addCombo("Громкость через", "t_ctl", {"Velocity", "CC1", "CC11"}, 1, "Чем задаётся колокол. Для длинных нот и легато нужен контроллер: CC1 (колесо модуляции, динамика BBCSO) или CC11");
     rows.getLast()->group = 1;
@@ -293,10 +293,17 @@ StbEditor::StbEditor(StbProcessor& p)
     rows.getLast()->slider->setNumDecimalPlacesToDisplay(2);
     addSlider("Порог velocity", "t_thr", 1, U("Для velocity: ноты тише этого не пишутся"), 1);
     addToggle("Тихие края через CC11", "t_edge", 1, U("CC1: контроллер 11 закрывает голос на краях диапазона, чтобы скачок вниз и вверх был беззвучным"), 1);
-    addToggle("Питчбенд между нотами", "t_glide", 1, U("Только легато и голоса: плавный сдвиг высоты прячет смену нот. В инструменте должен быть включён питчбенд с тем же диапазоном"), 1);
-    addSlider("Диапазон бенда, полутонов", "t_bend", 1, U("Диапазон питчбенда инструмента. У BBCSO Core это полтона"), 1);
+    addToggle("Подъём питча по пробегу", "t_glide", 1, U("Легато: питчбенд плавно растёт вместе с рядом нот и сбрасывается на переходе вниз, где голос закрыт. Работает только у инструментов с питчбендом"), 1);
+    addSlider("Бенд, полутонов", "t_bend", 1, U("Диапазон питчбенда инструмента. У BBCSO Core полтона, в синтезаторе для глиссандо 24"), 1);
     rows.getLast()->slider->setNumDecimalPlacesToDisplay(1);
-    addSlider("Ширина глайда, %", "t_glideShare", 1, U("Какую часть шага занимает сдвиг высоты. 100 = центр на границе нот"), 1);
+    addSlider("Подъём питча, %", "t_glideShare", 1, U("Какую часть диапазона бенда занимает подъём за пробег. 100 = от минимума до максимума"), 1);
+    addSlider("Разброс времени, тиков", "t_humT", 1, U("Каждая нота начинается со случайным сдвигом до этого числа тиков, у голосов разный. Убирает одновременный щелчок смены нот"), 1);
+    addSlider("Разброс velocity", "t_humV", 1, U("Случайный сдвиг velocity каждой ноты в обе стороны"), 1);
+    addToggle("Сдвиг голосов", "t_stagger", 1, U("Голос k меняет ноту на k/N шага позже соседа, смены нот растекаются по времени"), 1);
+    addSlider("Мягкие края, октав", "t_taper", 1, U("Колокол плавно закрывается до нуля на этом числе октав у краёв диапазона. Прячет скачок вниз-вверх"), 1);
+    rows.getLast()->slider->setNumDecimalPlacesToDisplay(1);
+    addSlider("Наклон, дБ/окт", "t_tilt", 1, U("Верхние ноты струнных звучат громче нижних. Столько децибел убавляется на каждую октаву вверх"), 1);
+    rows.getLast()->slider->setNumDecimalPlacesToDisplay(1);
     addSlider("Velocity нот", "t_ccVel", 1, U("Velocity нот, когда громкость идёт контроллером"), 1);
 
     // ================= tempo, main
@@ -409,14 +416,20 @@ bool StbEditor::rowApplies(const Row& r) const {
     if (!(r.mask & (m == 0 ? 1 : 2))) return false;
     auto pv = [&](const char* id) { return (int)std::lround(proc.params.getRawParameterValue(id)->load()); };
     if (m == 0) {
-        const bool voices = pv("t_layout") == 1;
+        const int layout = pv("t_layout");
+        const bool voices = layout == 1, gliss = layout == 2, lines = voices || gliss;
         const int ctl = pv("t_ctl");
-        if (r.id == "t_tonic") return pv("t_set") != 0;
-        if (r.id == "t_thr") return !voices && ctl == 0;
-        if (r.id == "t_edge") return voices && ctl == 1;
-        if (r.id == "t_glide") return voices && pv("t_art") == 1;
-        if (r.id == "t_bend" || r.id == "t_glideShare") return voices && pv("t_art") == 1 && pv("t_glide") == 1;
-        if (r.id == "t_ccVel") return voices && ctl != 0;
+        const bool legato = pv("t_art") == 1;
+        if (r.id == "t_tonic") return pv("t_set") != 0 || gliss;
+        if (r.id == "t_set") return !gliss;
+        if (r.id == "t_thr") return !lines && ctl == 0;
+        if (r.id == "t_edge") return lines && ctl == 1;
+        if (r.id == "t_ccVel") return lines && ctl != 0;
+        if (r.id == "t_glide") return voices && legato;
+        if (r.id == "t_glideShare") return voices && legato && pv("t_glide") == 1;
+        if (r.id == "t_bend") return gliss || (voices && legato && pv("t_glide") == 1);
+        if (r.id == "t_humT" || r.id == "t_stagger") return voices;
+        if (r.id == "t_humV" || r.id == "t_taper" || r.id == "t_tilt") return lines;
         if (r.id == "t_vmin") return ctl != 2;
     } else {
         const bool st = pv("p_method") == 1;

@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
         auto bends = [&] { size_t n = 0; for (auto& t : p.view()->score.tracks) for (auto& c : t.ccs) if (c.cc == 128) ++n; return n; };
         auto ts = p.tonalSettings();
         expect(ts.glide && std::fabs(ts.bendRange - 0.5) < 1e-6 && ts.glideShare == 100, "glide defaults: on, half a semitone, 100 %");
+        expect(ts.stagger && ts.humTime == 8 && ts.humVel == 8 && std::fabs(ts.taperOct - 1.0) < 1e-6 && std::fabs(ts.tiltDb - 1.0) < 1e-6, "strings defaults: stagger, humanize 8, soft edges 1 octave, tilt 1 dB");
         expect(bends() > 400 && std::fabs(p.view()->bendRange - 0.5) < 1e-6, "default build writes pitch bend on the voice tracks");
         set(p, "t_glide", 0);
         expect(bends() == 0, "glide off: no pitch bend");
@@ -98,6 +99,21 @@ int main(int argc, char** argv) {
         set(p, "t_art", 1);
         set(p, "t_bend", 2.0f);
         expect(std::fabs(p.view()->bendRange - 2.0) < 1e-6 && bends() > 0, "bend range follows the parameter");
+    }
+
+    std::cout << "glissando profile\n";
+    {
+        StbProcessor p;
+        p.prepareToPlay(sr, 512);
+        set(p, "t_profile", 3);
+        auto ts = p.tonalSettings();
+        expect(ts.layout == shp::layoutGliss && ts.control == shp::ctlCc11 && std::fabs(ts.bendRange - 24.0) < 1e-6, "profile glissando: layout, CC11 and a bend of 24");
+        auto v = p.view();
+        expect(v->voices == 4 && v->score.tracks.size() == 4 && std::fabs(v->bendRange - 24.0) < 1e-6, "glissando builds 4 voice tracks");
+        size_t notes = 0; for (auto& t : v->score.tracks) notes += t.notes.size();
+        expect(notes <= 12, "glissando writes a few long notes");
+        set(p, "t_profile", 1);
+        expect(std::fabs(p.tonalSettings().bendRange - 0.5) < 1e-6 && p.tonalSettings().layout == shp::layoutVoices, "back to strings: bend range 0.5");
     }
 
     std::cout << "tonal profiles\n";
@@ -117,7 +133,7 @@ int main(int argc, char** argv) {
         for (auto& t : p.view()->score.tracks) for (auto& c : t.ccs) if (c.cc != 11 && c.cc != 128) only11 = false;
         expect(only11, "CC11 profile writes only CC11 and pitch bend");
         set(p, "t_vmax", 100);
-        expect(prof() == 3, "editing a hidden value turns the profile into Custom");
+        expect(prof() == 4, "editing a hidden value turns the profile into Custom");
         set(p, "t_profile", 1);
         expect(p.tonalSettings().vmax == 115 && prof() == 1, "choosing a profile restores its values");
         set(p, "t_low", 36);

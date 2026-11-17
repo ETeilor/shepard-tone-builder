@@ -214,56 +214,171 @@ static void testBend() {
         for (size_t i = 0; i < b.size(); ++i) { rng = rng && b[i].value >= 0 && b[i].value <= 16383; if (i) sorted = sorted && b[i].tick >= b[i - 1].tick; }
     }
     expect(all && rng && sorted, "bend: every voice track has an ordered pitch bend curve inside 14 bits");
-    // the sounding pitch (note + bend) is continuous at every step boundary of a chromatic line (steps of 1 semitone, range 0.5)
-    auto sounding = [&](const Track& t, long long tick) {
-        int note = -1; for (auto& n : t.notes) if (n.tick <= tick && tick < n.tick + 480) note = n.note;   // the latest started note
-        for (auto& n : t.notes) if (n.tick <= tick && tick < n.tick + n.length) note = n.note;
-        int bend = 8192; for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= tick) bend = c.value;
-        return note < 0 ? -1.0 : note + (bend - 8192) / 8191.0 * 0.5;
-    };
-    bool smooth = true;
-    const auto& t = sc.tracks[1];
-    for (size_t i = 1; i + 1 < t.notes.size(); ++i) {
-        if (t.notes[i].note < t.notes[i - 1].note) continue;         // the wrap is a jump on purpose
-        const long long b = t.notes[i].tick;
-        const double before = sounding(t, b - 1), after = sounding(t, b);
-        if (std::fabs(before - after) > 0.01) smooth = false;
+    // the wheel rises through a run and drops back only where the note wraps
+    bool ramp = true;
+    int drops = 0;
+    for (auto& t : sc.tracks) {
+        auto b = bendOf(t);
+        for (size_t i = 1; i < b.size(); ++i) {
+            if (b[i].value < b[i - 1].value) {
+                ++drops;
+                bool atWrap = false;
+                for (size_t n = 1; n < t.notes.size(); ++n) if (t.notes[n].note < t.notes[n - 1].note && std::llabs(t.notes[n].tick - b[i].tick) <= 1) atWrap = true;
+                if (b[i].tick >= sc.lengthTicks - 1) atWrap = true;   // the wrap of the first voice lies on the end of the region
+                ramp = ramp && atWrap;
+            }
+        }
     }
-    expect(smooth, "bend: pitch is continuous across every step boundary (chromatic, range 0.5)");
-    // bend is neutral in the middle of a step and at the wrap
-    bool centre = true;
-    for (size_t i = 1; i + 1 < t.notes.size(); ++i) {
-        if (t.notes[i].note < t.notes[i - 1].note || t.notes[i + 1].note < t.notes[i].note) continue;
-        const long long mid = t.notes[i].tick + 240;
-        int bend = 8192; for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= mid) bend = c.value;
-        // with a 100 % glide window the centre of the step is outside both windows
-        if (std::abs(bend - 8192) > 1) centre = false;
+    expect(ramp && drops == 4, "bend: the wheel only drops at the wrap of its voice (one wrap per voice in 6 bars)");
+    // it spans the whole bend range over a run: at the foot of the range near -R, near the top near +R
+    {
+        auto b = bendOf(sc.tracks[1]);
+        int lo = 99999, hi = -1; for (auto& c : b) { lo = std::min(lo, c.value); hi = std::max(hi, c.value); }
+        expect(lo < 8192 - 7000 && hi > 8192 + 7000, "bend: the ramp reaches nearly the full throw");
     }
-    expect(centre, "bend: neutral in the middle of a step");
-    // switches: off, staccato, velocity control give no bend
+    // depth parameter scales the ramp
+    {
+        auto half = s; half.glideShare = 50;
+        auto b = bendOf(buildTonal(half, tr).tracks[1]);
+        int hi = -1; for (auto& c : b) hi = std::max(hi, c.value);
+        expect(hi > 8192 + 3000 && hi < 8192 + 4300, "bend: depth 50 % halves the ramp");
+    }
     auto off = s; off.glide = false;
     auto stc = s; stc.articulation = artStaccato;
     bool none = true;
     for (auto* x : {&off, &stc}) for (auto& tt : buildTonal(*x, tr).tracks) none = none && bendOf(tt).empty();
     expect(none, "bend: not written when glide is off or for staccato");
-    // steps bigger than twice the range cannot be hidden: the curve stays at the limit but within range
-    auto wide = s; wide.pitchSet = psMajor; wide.interval = 2;
-    bool lim = true;
-    for (auto& tt : buildTonal(wide, tr).tracks) for (auto& c : bendOf(tt)) lim = lim && c.value >= 0 && c.value <= 16383;
-    expect(lim, "bend: large steps stay inside the bend range");
-    // MIDI file round trip keeps the bend values
     auto bytes = writeMidi(sc);
     ReadResult rr;
     expect(readMidi(bytes.data(), bytes.size(), rr), "bend: file reads back");
-    size_t nb = 0; bool same = true;
-    if (rr.tracks.size() >= 5) {
+    bool same = rr.tracks.size() == 5;
+    if (same) {
         auto got = bendOf(Track{"", {}, rr.tracks[2].ccs});
         auto want = bendOf(sc.tracks[1]);
-        nb = got.size();
-        same = got.size() == want.size();
+        same = got.size() == want.size() && got.size() > 100;
         for (size_t i = 0; same && i < got.size(); ++i) same = got[i].tick == want[i].tick && got[i].value == want[i].value;
-    } else same = false;
-    expect(same && nb > 100, "bend: MIDI file round trip keeps every pitch bend event");
+    }
+    expect(same, "bend: MIDI file round trip keeps every pitch bend event");
+}
+
+static void testHumanize() {
+    Transport tr; tr.num = 4; tr.den = 4; tr.bpm = 120;
+    TonalSettings s;
+    s.layout = layoutVoices; s.control = ctlCc11; s.articulation = artLegato; s.glide = false;
+    s.low = 48; s.high = 96; s.stepTicks = 480; s.vmin = 1; s.vmax = 115; s.ccVelocity = 96; s.lengthBars = 6;
+    {
+        auto st = s; st.stagger = true;
+        auto sc = buildTonal(st, tr);
+        bool ok = true;
+        for (size_t k = 0; k < sc.tracks.size(); ++k) {
+            auto& n = sc.tracks[k].notes;
+            if (k == 0) ok = ok && n[0].tick == 0 && n[1].tick == 480;
+            else ok = ok && n[0].tick == 0 && n[0].length >= (int)(k * 120) && n[1].tick == (long long)(k * 120);
+            ok = ok && n.size() >= 48;
+        }
+        expect(ok, "stagger: voice k changes its note k/4 of a step later and the first step is the tail of the previous one");
+        auto sc2 = buildTonal(st, tr);
+        bool equal = true;
+        for (size_t k = 0; k < sc.tracks.size(); ++k) equal = equal && sc.tracks[k].notes.size() == sc2.tracks[k].notes.size();
+        expect(equal, "stagger: deterministic");
+    }
+    {
+        auto h = s; h.humTime = 10; h.humVel = 8;
+        auto a = buildTonal(h, tr), b = buildTonal(h, tr);
+        auto d = h; d.seed = 7;
+        auto c = buildTonal(d, tr);
+        bool inTime = true, inVel = true, same = true, differs = false;
+        for (size_t k = 0; k < a.tracks.size(); ++k) {
+            auto& n = a.tracks[k].notes;
+            for (size_t i = 1; i < n.size(); ++i) {
+                const long long grid = (long long)i * 480;
+                inTime = inTime && std::llabs(n[i].tick - grid) <= 10;
+                inVel = inVel && n[i].velocity >= 88 && n[i].velocity <= 104;
+                same = same && n[i].tick == b.tracks[k].notes[i].tick && n[i].velocity == b.tracks[k].notes[i].velocity;
+                if (n[i].tick != c.tracks[k].notes[i].tick) differs = true;
+            }
+        }
+        expect(inTime && inVel, "humanize: start within +-10 ticks and velocity within +-8 of the set value");
+        expect(same && differs, "humanize: same seed gives the same notes, another seed other notes");
+    }
+    {
+        auto tp = s; tp.control = ctlCc1; tp.vmin = 20; tp.taperOct = 1.0;
+        auto tl = s; tl.control = ctlCc1; tl.vmin = 20; tl.tiltDb = 2.0;
+        auto b0 = s; b0.control = ctlCc1; b0.vmin = 20;
+        auto level1 = [&](const TonalSettings& x) {
+            auto ccs = buildTonal(x, tr).tracks[1].ccs;
+            std::vector<int> v; size_t i = 0; int cur = 0;
+            for (long long tick = 0; tick < 23040; tick += 97) { while (i < ccs.size() && ccs[i].tick <= tick) { if (ccs[i].cc == 1) cur = ccs[i].value; ++i; } v.push_back(cur); }
+            return v;
+        };
+        auto base = level1(b0), taper = level1(tp), tilt = level1(tl);
+        bool le1 = base.size() == taper.size() && base.size() == tilt.size(), lt1 = false, lt2 = false;
+        for (size_t i = 0; le1 && i < base.size(); ++i) { le1 = le1 && taper[i] <= base[i] && tilt[i] <= base[i]; lt1 = lt1 || taper[i] < base[i]; lt2 = lt2 || tilt[i] < base[i]; }
+        expect(le1 && lt1 && lt2, "taper and tilt only turn the level down, and do so");
+    }
+}
+
+static void testGliss() {
+    Transport tr; tr.num = 4; tr.den = 4; tr.bpm = 120;
+    TonalSettings s;
+    s.layout = layoutGliss; s.control = ctlCc11; s.low = 48; s.high = 96; s.stepTicks = 480; s.vmin = 1; s.vmax = 115; s.ccVelocity = 96;
+    s.bendRange = 24; s.lengthBars = 6;
+    expect(tonalVoiceCount(s) == 4, "gliss: 4 octaves of range with a bend of 24 give 4 voices");
+    { auto x = s; x.bendRange = 12; expect(tonalVoiceCount(x) == 2, "gliss: a bend of 12 allows only 2 voices"); }
+    expect(tonalCycleTicks(s) == 48 * 480, "gliss: one loop is 48 semitones at one semitone per step");
+    auto sc = buildTonal(s, tr);
+    expect(sc.tracks.size() == 4, "gliss: one track per voice");
+    bool few = true, rng = true, cont = true, cc11only = true;
+    auto q = [&](int k, double tick) { const double x = (double)(12 * k) + tick / 480.0; return 48 + (x - std::floor(x / 48.0) * 48.0); };
+    for (int k = 0; k < 4; ++k) {
+        auto& t = sc.tracks[(size_t)k];
+        few = few && t.notes.size() >= 1 && t.notes.size() <= 2;
+        for (auto& n : t.notes) few = few && n.length > 5000;
+        for (auto& c : t.ccs) if (c.cc == 128) rng = rng && c.value >= 0 && c.value <= 16383; else cc11only = cc11only && c.cc == 11;
+        // sounding pitch = note + bend, compared with the ideal glissando
+        for (long long tick = 100; tick < 23000; tick += 997) {
+            int note = -1; for (auto& n : t.notes) if (n.tick <= tick && tick < n.tick + n.length) note = n.note;
+            int bendv = 8192; for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= tick) bendv = c.value;
+            const double sounding = note + (bendv - 8192) / 8191.0 * 24.0;
+            const double want = q(k, (double)tick);
+            if (note < 0 || std::fabs(sounding - want) > 0.05) cont = false;
+        }
+    }
+    expect(few && rng && cc11only, "gliss: one long note per run, bend and CC11 only");
+    expect(cont, "gliss: note plus bend follows the ideal glissando within 5 cents");
+    // the bell: CC11 is 0 where the voice is at the ends of its range
+    {
+        auto& t = sc.tracks[0];
+        int v0 = 999;   // voice 0 starts at the low end
+        for (auto& c : t.ccs) if (c.cc == 11 && c.tick == 0) v0 = c.value;
+        expect(v0 == 0, "gliss: the voice at the foot of the range is silent");
+    }
+    // closed loop: the pitch at the end of the region equals the pitch at its start
+    bool closed = true;
+    for (int k = 0; k < 4; ++k) closed = closed && std::fabs(q(k, 0) - q(k, 23040)) < 1e-9;
+    expect(closed, "gliss: the loop closes after one cycle");
+    // a velocity request falls back to CC11
+    { auto x = s; x.control = ctlVelocity; bool ok = true; for (auto& t : buildTonal(x, tr).tracks) { bool has = false; for (auto& c : t.ccs) if (c.cc == 11) has = true; ok = ok && has; } expect(ok, "gliss: velocity control is replaced by CC11"); }
+    // down direction
+    {
+        auto x = s; x.direction = dirDown;
+        auto sd = buildTonal(x, tr);
+        bool ok = sd.tracks.size() == 4;
+        for (auto& t : sd.tracks) { int a = -1, b = -1; for (auto& c : t.ccs) if (c.cc == 128) { if (a < 0) a = c.value; b = c.value; } ok = ok && !t.notes.empty(); (void)a; (void)b; }
+        auto& t = sd.tracks[1];
+        int first = -1, mid = -1; for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= 0) first = c.value;
+        for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= 200) mid = c.value;
+        expect(ok && mid < first, "gliss: down direction lowers the wheel");
+    }
+    // MIDI round trip
+    {
+        auto bytes = writeMidi(sc);
+        ReadResult rr;
+        bool ok = readMidi(bytes.data(), bytes.size(), rr) && rr.tracks.size() == 5;
+        size_t nb = 0, nw = 0;
+        if (ok) { for (auto& c : rr.tracks[1].ccs) if (c.cc == 128) ++nb; for (auto& c : sc.tracks[0].ccs) if (c.cc == 128) ++nw; }
+        expect(ok && nb == nw && nb > 100, "gliss: MIDI round trip keeps the bend events");
+    }
 }
 
 static void testVoices() {
@@ -531,6 +646,8 @@ int main() {
     testTonal();
     testVoices();
     testBend();
+    testHumanize();
+    testGliss();
     testTempo();
     testMidi();
     std::printf("%d checks, %d failed\n", checks, failures);

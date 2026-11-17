@@ -69,15 +69,21 @@ APVTS::ParameterLayout StbProcessor::makeLayout() {
     flag("t_cc11", "CC11", false);
     integer("t_ccVel", "CC11 velocity", 1, 127, 96);
     // added in 0.2
-    choice("t_profile", "Profile", {"Synth", "Strings legato CC1", "Strings legato CC11", "Custom"}, 1);
-    choice("t_layout", "Layout", {"Chord per step", "Voice lines"}, 1);
+    choice("t_profile", "Profile", {"Synth", "Strings legato CC1", "Strings legato CC11", "Synth glissando", "Custom"}, 1);
+    choice("t_layout", "Layout", {"Chord per step", "Voice lines", "Glissando"}, 1);
     choice("t_ctl", "Dynamics by", {"Velocity", "CC1", "CC11"}, 1);
     flag("t_edge", "Silent edges (CC11)", true);
     flag("t_whole", "Whole loops", true);
     // added in 0.2.1
     flag("t_glide", "Pitch glide", true);
-    real("t_bend", "Bend range", 0.1f, 12.0f, 0.1f, 0.5f);
-    integer("t_glideShare", "Glide width", 10, 200, 100);
+    real("t_bend", "Bend range", 0.1f, 48.0f, 0.1f, 0.5f);
+    integer("t_glideShare", "Pitch ramp depth", 0, 200, 100);
+    // added in 0.3.0
+    integer("t_humT", "Timing spread", 0, 60, 8);
+    integer("t_humV", "Velocity spread", 0, 30, 8);
+    flag("t_stagger", "Stagger voices", true);
+    real("t_taper", "Soft edges", 0.0f, 3.0f, 0.1f, 1.0f);
+    real("t_tilt", "Register tilt", 0.0f, 6.0f, 0.1f, 1.0f);
 
     // tempo
     choice("p_method", "Method", {"Smooth", "Stepped"}, 0);
@@ -179,6 +185,11 @@ shp::TonalSettings StbProcessor::tonalSettings() const {
     s.glide = iv(params, "t_glide") != 0;
     s.bendRange = fv(params, "t_bend");
     s.glideShare = iv(params, "t_glideShare");
+    s.humTime = iv(params, "t_humT");
+    s.humVel = iv(params, "t_humV");
+    s.stagger = iv(params, "t_stagger") != 0;
+    s.taperOct = fv(params, "t_taper");
+    s.tiltDb = fv(params, "t_tilt");
     s.lengthBars = iv(params, "bars");
     if (iv(params, "t_whole") != 0) s.lengthBars = shp::tonalWholeCycleBars(s, transport(), s.lengthBars);
     return s;
@@ -233,16 +244,18 @@ void StbProcessor::setParamValue(const char* id, float value) {
 void StbProcessor::handleAsyncUpdate() { rebuild(); }
 
 namespace {
-struct Profile { int layout, ctl, art, gate, vmin, vmax; double gamma; int thr, edge; };
-const Profile kProfiles[3] = {
-    {0, 0, 0, 0, 12, 120, 1.0, 6, 1},     // Synth: a chord of octaves per step, velocity
-    {1, 1, 1, 0, 20, 115, 1.0, 0, 1},     // Strings legato, mod wheel (CC1), CC11 closes the edges
-    {1, 2, 1, 0, 1, 115, 1.0, 0, 0},      // Strings legato, expression (CC11) carries the bell
+struct Profile { int layout, ctl, art, gate, vmin, vmax; double gamma; int thr, edge; double bend; };
+const int kNumProfiles = 4, kCustomProfile = 4;
+const Profile kProfiles[kNumProfiles] = {
+    {0, 0, 0, 0, 12, 120, 1.0, 6, 1, 0.5},     // Synth: a chord of octaves per step, velocity
+    {1, 1, 1, 0, 20, 115, 1.0, 0, 1, 0.5},     // Strings legato, mod wheel (CC1), CC11 closes the edges
+    {1, 2, 1, 0, 1, 115, 1.0, 0, 0, 0.5},      // Strings legato, expression (CC11) carries the bell
+    {2, 2, 1, 0, 1, 115, 1.0, 0, 0, 24.0},     // Synth glissando: long notes, the wheel (24 semitones) rises, CC11 carries the bell
 };
 }  // namespace
 
 bool StbProcessor::matchesProfile(int profile) const {
-    if (profile < 0 || profile > 2) return true;
+    if (profile < 0 || profile >= kNumProfiles) return true;
     const auto& p = kProfiles[profile];
     return iv(params, "t_layout") == p.layout && iv(params, "t_ctl") == p.ctl && iv(params, "t_art") == p.art &&
            iv(params, "t_gate") == p.gate && iv(params, "t_vmin") == p.vmin && iv(params, "t_vmax") == p.vmax &&
@@ -250,7 +263,7 @@ bool StbProcessor::matchesProfile(int profile) const {
 }
 
 void StbProcessor::applyProfile(int profile) {
-    if (profile < 0 || profile > 2) return;
+    if (profile < 0 || profile >= kNumProfiles) return;
     const auto& p = kProfiles[profile];
     applying_ = true;
     setParamValue("t_layout", (float)p.layout);
@@ -262,6 +275,7 @@ void StbProcessor::applyProfile(int profile) {
     setParamValue("t_gamma", (float)p.gamma);
     setParamValue("t_thr", (float)p.thr);
     setParamValue("t_edge", (float)p.edge);
+    setParamValue("t_bend", (float)p.bend);
     setParamValue("t_cc11", 0.0f);
     setParamValue("t_output", 0.0f);
     setParamValue("t_spread", 0.0f);
@@ -287,9 +301,9 @@ void StbProcessor::rebuild() {
         if (profile != lastProfile_) {
             lastProfile_ = profile;
             applyProfile(profile);
-        } else if (profile < 3 && !matchesProfile(profile)) {
-            lastProfile_ = 3;
-            setParamValue("t_profile", 3.0f);
+        } else if (profile < kNumProfiles && !matchesProfile(profile)) {
+            lastProfile_ = kCustomProfile;
+            setParamValue("t_profile", (float)kCustomProfile);
         }
     }
     auto v = std::make_shared<View>();
@@ -302,7 +316,7 @@ void StbProcessor::rebuild() {
         if (ts.layout == shp::layoutChord) { ts.output = shp::outSingle; ts.cc11 = false; }
         v->score = shp::buildTonal(ts, v->tr);
         v->cycles = 0;
-        v->voices = ts.layout == shp::layoutVoices ? shp::tonalVoiceCount(ts) : 0;
+        v->voices = ts.layout != shp::layoutChord ? shp::tonalVoiceCount(ts) : 0;
         v->cycleTicks = shp::tonalCycleTicks(ts);
         v->bars = ts.lengthBars;
         v->bendRange = ts.bendRange;
@@ -352,7 +366,8 @@ juce::String StbProcessor::fileBaseName() const {
     if (mode() == 0) {
         auto t = tonalSettings();
         s = juce::String("Shepard tonal ") + (t.direction == shp::dirUp ? "up " : "down ") + juce::String(t.lengthBars) + " bars";
-        if (t.layout == shp::layoutVoices) s += t.control == shp::ctlCc11 ? " voices CC11" : t.control == shp::ctlCc1 ? " voices CC1" : " voices";
+        if (t.layout == shp::layoutGliss) s += " glissando";
+        else if (t.layout == shp::layoutVoices) s += t.control == shp::ctlCc11 ? " voices CC11" : t.control == shp::ctlCc1 ? " voices CC1" : " voices";
         else if (t.cc11) s += " CC11";
     } else {
         auto t = tempoSettings();
