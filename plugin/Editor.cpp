@@ -1,4 +1,5 @@
 #include "Editor.h"
+#include "Brand.h"
 #include <cmath>
 
 static juce::String noteName(int n) {
@@ -196,6 +197,7 @@ static void noteText(juce::Slider& s) {
 StbEditor::StbEditor(StbProcessor& p)
     : AudioProcessorEditor(&p), proc(p), graph(p), gridEdit(p), card(p) {
     setLookAndFeel(&look);
+    logo = brand::make(false, ui::text);
     addAndMakeVisible(graph);
     addChildComponent(gridEdit);
     addAndMakeVisible(infoLabel);
@@ -417,9 +419,8 @@ void StbEditor::paint(juce::Graphics& g) {
     g.setColour(ui::text);
     g.setFont(ui::font(13.0f, true));
     g.drawText("SHEPARD TONE BUILDER", 24, 12, 300, 22, juce::Justification::centredLeft);
-    g.setColour(ui::textDim);
-    g.setFont(ui::font(12.0f));
-    g.drawText("Teilormusic", getWidth() - 24 - 200, 12, 200, 22, juce::Justification::centredRight);
+    if (logo) logo->drawWithin(g, juce::Rectangle<float>((float)getWidth() - 24.0f - 150.0f, 15.0f, 150.0f, 15.0f),
+                               juce::RectanglePlacement::xRight | juce::RectanglePlacement::yMid, 0.85f);
     g.setColour(ui::line);
     g.drawHorizontalLine(bottomArea.getY() - 8, 24, (float)getWidth() - 24);
 }

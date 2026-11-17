@@ -80,6 +80,7 @@ private:
     juce::Label infoLabel, gridLabel, settingsHead, sharedHead;
     DragCard card;
     std::unique_ptr<juce::FileChooser> chooser;
+    std::unique_ptr<juce::Drawable> logo;
     int shownMode_ = -1;
     juce::Rectangle<int> graphArea, setArea, sharedArea, bottomArea, gridArea;
 };

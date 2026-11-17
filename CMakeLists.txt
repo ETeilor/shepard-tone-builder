@@ -44,6 +44,7 @@ if(STB_BUILD_PLUGIN)
         PLUGIN_MANUFACTURER_CODE Tlrm
         PLUGIN_CODE Shpd
         FORMATS AU VST3 Standalone
+        ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.png"
         PRODUCT_NAME "Shepard Tone Builder"
         IS_SYNTH TRUE
         NEEDS_MIDI_INPUT TRUE
