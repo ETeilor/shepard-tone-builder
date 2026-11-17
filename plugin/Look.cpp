@@ -117,8 +117,25 @@ void StbLook::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, fl
 }
 
 // thin track, small round thumb; a slider whose minimum is below zero shows "=" there ("same as the overall")
-void StbLook::drawLinearSlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float, float,
-                                 juce::Slider::SliderStyle, juce::Slider& s) {
+void StbLook::drawLinearSlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float minPos, float maxPos,
+                                 juce::Slider::SliderStyle style, juce::Slider& s) {
+    if (style == juce::Slider::TwoValueHorizontal) {
+        // range: two handles, the stretch between them is lit
+        const float cy2 = (float)y + (float)h / 2.0f;
+        g.setColour(ui::line);
+        g.fillRoundedRectangle((float)x, cy2 - 1.0f, (float)w, 2.0f, 1.0f);
+        g.setColour(ui::accent);
+        g.fillRoundedRectangle(minPos, cy2 - 1.5f, maxPos - minPos, 3.0f, 1.5f);
+        const float t2 = s.isMouseOverOrDragging() ? 6.5f : 5.5f;
+        for (float px : {minPos, maxPos}) {
+            g.setColour(ui::accent);
+            g.fillEllipse(px - t2, cy2 - t2, t2 * 2, t2 * 2);
+            g.setColour(ui::bg);
+            g.fillEllipse(px - t2 + 2.5f, cy2 - t2 + 2.5f, (t2 - 2.5f) * 2, (t2 - 2.5f) * 2);
+        }
+        return;
+    }
+    (void)pos;
     float cy = (float)y + (float)h / 2.0f;
     float x0 = (float)x, x1 = (float)(x + w);
     bool automatic = s.getMinimum() < 0 && s.getValue() < 0;

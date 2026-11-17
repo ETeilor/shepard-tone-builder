@@ -29,7 +29,7 @@ void GraphView::paint(juce::Graphics& g) {
         }
     const int stride = vw->events.size() > 12000 ? (int)(vw->events.size() / 12000) + 1 : 1;
     if (vw->mode == 0) {
-        const int lo = vw->tonal.low, hi = vw->tonal.high;
+        const int lo = vw->tonal.low, hi = vw->voices > 0 ? std::min(127, vw->tonal.low + 12 * vw->voices) : vw->tonal.high;
         const float span = (float)std::max(1, hi - lo + 1);
         // octave rulers
         g.setFont(ui::font(10.5f));
@@ -43,11 +43,17 @@ void GraphView::paint(juce::Graphics& g) {
         const float h = std::max(1.5f, in.getHeight() / span - 0.5f);
         for (size_t i = 0; i < vw->events.size(); i += (size_t)stride) {
             const auto& e = vw->events[i];
+            if (e.kind != 0) continue;
             const float x = in.getX() + in.getWidth() * (float)((double)e.tick / len);
             const float w = std::max(1.5f, in.getWidth() * (float)((double)e.length / len));
             const float y = in.getBottom() - in.getHeight() * ((float)(e.note - lo) + 1.0f) / span;
-            g.setColour(ui::accent.withAlpha(0.15f + 0.85f * (float)e.velocity / 127.0f));
-            g.fillRect(x, y, std::min(w, in.getRight() - x), h);
+            if (vw->voices > 0) {
+                g.setColour(ui::layerColour(e.layer).withAlpha(0.12f + 0.88f * std::min(1.0f, e.level)));
+                g.fillRect(x, y, std::min(w, in.getRight() - x), std::max(h, 3.0f));
+            } else {
+                g.setColour(ui::accent.withAlpha(0.15f + 0.85f * (float)e.velocity / 127.0f));
+                g.fillRect(x, y, std::min(w, in.getRight() - x), h);
+            }
         }
     } else {
         const int layers = std::max(1, (int)vw->score.tracks.size());
@@ -62,6 +68,7 @@ void GraphView::paint(juce::Graphics& g) {
         }
         for (size_t i = 0; i < vw->events.size(); i += (size_t)stride) {
             const auto& e = vw->events[i];
+            if (e.kind != 0) continue;
             const float x = in.getX() + in.getWidth() * (float)((double)e.tick / len);
             const float cy = in.getBottom() - rowH * ((float)e.layer + 0.5f);
             const float v = (float)e.velocity / 127.0f;
@@ -190,6 +197,45 @@ StbEditor::Row& StbEditor::addToggle(const char* text, const char* id, int mask,
     return *r;
 }
 
+// one slider with two handles for the lowest and the highest note
+void StbEditor::addRange() {
+    auto* r = rows.add(new Row());
+    r->mask = 1; r->group = 0; r->id = "range";
+    r->label.setText(U("Диапазон"), juce::dontSendNotification);
+    r->label.setFont(ui::font(12.5f));
+    r->label.setColour(juce::Label::textColourId, ui::textDim);
+    const auto tip = U("Нижняя и верхняя нота. Голосов столько, сколько октав в диапазоне (от 2 до 8). Подберите под диапазон инструмента.");
+    r->label.setTooltip(tip);
+    r->slider = std::make_unique<juce::Slider>(juce::Slider::TwoValueHorizontal, juce::Slider::NoTextBox);
+    r->slider->setRange(12, 120, 1);
+    r->slider->setMinAndMaxValues(proc.params.getRawParameterValue("t_low")->load(), proc.params.getRawParameterValue("t_high")->load(), juce::dontSendNotification);
+    r->slider->setTooltip(tip);
+    r->valueText = std::make_unique<juce::Label>();
+    r->valueText->setFont(ui::font(12.5f));
+    r->valueText->setColour(juce::Label::textColourId, ui::text);
+    r->valueText->setJustificationType(juce::Justification::centredRight);
+    auto* sl = r->slider.get();
+    auto* vt = r->valueText.get();
+    sl->onValueChange = [this, sl, vt]() {
+        if (syncingRange_) return;
+        int lo = (int)std::lround(sl->getMinValue()), hi = (int)std::lround(sl->getMaxValue());
+        if (hi - lo < 12) {
+            // keep at least one octave: the handle that is not being dragged stays
+            if (sl->getThumbBeingDragged() == 1) lo = hi - 12; else hi = lo + 12;
+            lo = std::max(12, lo); hi = std::min(120, std::max(hi, lo + 12));
+            syncingRange_ = true;
+            sl->setMinAndMaxValues(lo, hi, juce::dontSendNotification);
+            syncingRange_ = false;
+        }
+        vt->setText(noteName(lo) + " - " + noteName(hi), juce::dontSendNotification);
+        proc.setParamValue("t_low", (float)lo);
+        proc.setParamValue("t_high", (float)hi);
+    };
+    addChildComponent(r->label);
+    addChildComponent(*r->slider);
+    addChildComponent(*r->valueText);
+}
+
 static void noteText(juce::Slider& s) {
     s.textFromValueFunction = [](double v) { return noteName((int)v); };
 }
@@ -213,65 +259,74 @@ StbEditor::StbEditor(StbProcessor& p)
     tab(tabTonal, "Тональный", 0, "Бесконечно растущая или падающая нота: октавные голоса с колоколом громкости");
     tab(tabTempo, "Темповой", 1, "Бесконечное ускорение или замедление: слои одного ритма и огибающая громкости, темп проекта не меняется");
 
-    // ---- tonal
+    // ================= tonal, main
+    addCombo("Профиль", "t_profile", {"Синтезатор (velocity)", "Струнные легато, CC1", "Струнные легато, CC11", "Свой"}, 1,
+             "Готовые настройки. Струнные: по одному треку на голос, колокол громкости идёт контроллером (CC1 колесо модуляции, CC11 экспрессия). Синтезатор: аккорд октав на шаг, громкость velocity. Правка скрытых параметров переключает на «Свой».");
     addCombo("Направление", "t_dir", {"Вверх", "Вниз"}, 1, "Куда уходит высота");
     addCombo("Звукоряд", "t_set", {"Хроматика", "Целотонный", "Уменьшённый (тон-полутон)", "Мажорная пентатоника", "Минорная пентатоника", "Мажор", "Минор", "Дорийский", "Миксолидийский"}, 1, "Из каких ступеней строится лестница");
-    addSlider("Тоника", "t_tonic", 1, U("Ступень, с которой начинается цикл (0 = C, 1 = C#...)"));
+    addSlider("Тоника", "t_tonic", 1, U("Ступень, с которой начинается цикл. Для хроматики ничего не меняет"));
     rows.getLast()->slider->textFromValueFunction = [](double v) { return noteName((int)v + 24).dropLastCharacters(1); };
-    addSlider("Шаг лестницы", "t_interval", 1, U("На сколько ступеней звукоряда сдвигается каждый шаг. Цикл замыкается через n / НОД(n, шаг) шагов. Для тритонового парадокса безопаснее до 5, 7 это круг квинт"));
-    addSlider("Нижняя нота", "t_low", 1, U("Нижняя граница диапазона")); noteText(*rows.getLast()->slider);
-    addSlider("Верхняя нота", "t_high", 1, U("Верхняя граница диапазона")); noteText(*rows.getLast()->slider);
-    addSlider("Центр колокола", "t_center", 1, U("Где громче всего. 0 = середина диапазона"));
-    rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("авто") : noteName((int)v); };
-    addSlider("Ширина колокола", "t_width", 1, U("В октавах. 0 = весь диапазон"));
+    addRange();
+    addSlider("Ширина колокола", "t_width", 1, U("В октавах. «весь» это колокол на весь диапазон: голоса в сумме дают ровную громкость"));
     rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 0.25 ? U("весь") : juce::String(v, 1) + U(" окт"); };
+    addCombo("Скорость, шаг", "stepLen", {"1/4", "1/8", "1/8 триоль", "1/16", "1/16 триоль", "1/32", "1/32 триоль", "1/64"}, 1,
+             "Длина шага лестницы в долях такта. Темп проекта делает подъём быстрее или медленнее, ноты в файле от него не зависят. Для легато струнных удобны 1/8 и 1/16");
+    addSlider("Длина, тактов", "bars", 1, U("Длина региона в тактах. При включённом «Целое число циклов» длина округляется вверх до целых циклов"));
+    addToggle("Целое число циклов", "t_whole", 1, U("Длина региона подгоняется так, чтобы в ней уместились целые циклы и петля замыкалась без стыка"));
+    // ================= tonal, advanced
+    addSlider("Шаг лестницы", "t_interval", 1, U("На сколько ступеней звукоряда сдвигается каждый шаг. Для тритонового парадокса безопаснее до 5, 7 это круг квинт"), 1);
+    addSlider("Центр колокола", "t_center", 1, U("Где громче всего. 0 = середина диапазона"), 1);
+    rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("авто") : noteName((int)v); };
     addCombo("Форма колокола", "t_shape", {"Косинус", "Гаусс"}, 1, "Как громкость падает к краям диапазона");
-    addCombo("Артикуляция", "t_art", {"Стаккато", "Легато"}, 1, "Легато: ноты длиннее шага и подхватывают друг друга");
-    addSlider("Длина ноты, %", "t_gate", 1, U("Процент шага. 0 = по артикуляции (60 стаккато, 140 легато)"));
+    rows.getLast()->group = 1;
+    addCombo("Раскладка", "t_layout", {"Аккорд на шаг", "Линии по голосам"}, 1, "Линии по голосам: трек на голос, плавная громкость контроллером. Аккорд на шаг: все октавы одним треком");
+    rows.getLast()->group = 1;
+    addCombo("Громкость через", "t_ctl", {"Velocity", "CC1", "CC11"}, 1, "Чем задаётся колокол. Для длинных нот и легато нужен контроллер: CC1 (колесо модуляции, динамика BBCSO) или CC11");
+    rows.getLast()->group = 1;
+    addCombo("Артикуляция", "t_art", {"Стаккато", "Легато"}, 1, "Легато: ноты чуть перекрываются, чтобы сработал легато-скрипт");
+    rows.getLast()->group = 1;
+    addSlider("Длина ноты, %", "t_gate", 1, U("Процент шага. 0 = по артикуляции"), 1);
     rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("авто") : juce::String((int)v); };
-    addCombo("Разброс октав", "t_spread", {"Вместе", "Вверх", "Вниз", "Случайно"}, 1, "Сдвигает вступление октавных голосов внутри шага");
-    addSlider("Доля шага", "t_spreadPct", 1, U("Какую часть шага занимает разброс"));
-    addSlider("Velocity мин", "t_vmin", 1, U("Громкость на краю колокола"));
-    addSlider("Velocity макс", "t_vmax", 1, U("Громкость в центре колокола"));
-    addSlider("Кривая", "t_gamma", 1, U("Меньше 1 громче середина, больше 1 уже колокол. Подбирайте на слух под библиотеку"));
+    addSlider("Уровень мин", "t_vmin", 1, U("Значение контроллера (или velocity) на краях колокола"), 1);
+    addSlider("Уровень макс", "t_vmax", 1, U("Значение контроллера (или velocity) в центре колокола"), 1);
+    addSlider("Кривая", "t_gamma", 1, U("Меньше 1 громче середина, больше 1 уже колокол. Подбирайте на слух под библиотеку"), 1);
     rows.getLast()->slider->setNumDecimalPlacesToDisplay(2);
-    addSlider("Порог", "t_thr", 1, U("Ноты тише этой velocity не пишутся"));
-    addSlider("Разброс velocity", "t_jitter", 1, U("Случайный разброс, повторяется при том же зерне"));
-    addSlider("Зерно", "t_seed", 1, U("Зерно случайности"));
-    addCombo("Вывод", "t_output", {"Один трек", "По регистрам", "По октавам"}, 1, "Как раскладывать ноты по трекам в файле");
-    addSlider("Регистров", "t_regTracks", 1, U("Число треков при выводе по регистрам"));
-    addToggle("CC11 вместо velocity", "t_cc11", 1, U("Экспериментально. Громкость идёт контроллером 11 на отдельном треке каждой октавы, velocity постоянная. Вывод станет «по октавам»"));
-    addSlider("Velocity при CC11", "t_ccVel", 1, U("Постоянная velocity нот при включённом CC11"));
+    addSlider("Порог velocity", "t_thr", 1, U("Для velocity: ноты тише этого не пишутся"), 1);
+    addToggle("Тихие края через CC11", "t_edge", 1, U("CC1: контроллер 11 закрывает голос на краях диапазона, чтобы скачок вниз и вверх был беззвучным"), 1);
+    addSlider("Velocity нот", "t_ccVel", 1, U("Velocity нот, когда громкость идёт контроллером"), 1);
 
-    // ---- tempo
+    // ================= tempo, main
     addCombo("Метод", "p_method", {"Плавный", "Ступенчатый"}, 2, "Плавный: логарифмическая шкала времени. Ступенчатый: ускорения на целых долях, удары попадают на сетку");
-    addCombo("Ступеней на удвоение", "p_stages", {"2", "3", "4", "6", "8"}, 2, "Только для ступенчатого метода");
     addCombo("Направление", "p_dir", {"Ускорение", "Замедление"}, 2, "Замедление это то же самое, перевёрнутое во времени");
     addSlider("Слоёв", "p_layers", 2, U("Сколько копий ритма звучит одновременно в разных скоростях"));
     addCombo("Рисунок", "p_preset", {"Часы, четыре доли", "Один удар в такт", "Восьмые", "Шестнадцатые", "Триоли", "Тресильо", "Клаве сон 3-2", "Свой"}, 2, "Готовые рисунки одного такта. Правка сетки переключает на «Свой»");
-    addSlider("Нота", "p_note", 2, U("Нота, которой пишутся удары")); noteText(*rows.getLast()->slider);
-    addCombo("Старт", "p_start", {"Авто", "Точный", "Выровненный"}, 2, "Выровненный: все слои совпадают на начале цикла. Точный: стартовая скорость ровно 1");
-    addSlider("Velocity мин", "p_vmin", 2, U("Самая тихая нота"));
-    addSlider("Velocity макс", "p_vmax", 2, U("Самая громкая нота"));
-    addSlider("Кривая", "p_gamma", 2, U("Подбирайте на слух под библиотеку"));
-    rows.getLast()->slider->setNumDecimalPlacesToDisplay(2);
-    addSlider("Нижний порог", "p_floor", 2, U("Удары тише этого уровня не пишутся"));
-    rows.getLast()->slider->setNumDecimalPlacesToDisplay(3);
-    addCombo("Длина ноты", "p_lenMode", {"Пропорциональная", "Фиксированная"}, 2, "Фиксированная лучше для сэмплов вроде щипков и часов");
-    addSlider("Доля интервала, %", "p_gate", 2, U("Для пропорциональной длины"));
-    addSlider("Тиков", "p_ticks", 2, U("Для фиксированной длины, 960 тиков = четверть"));
-    addSlider("Макс. ударов в сек", "p_maxPerSec", 2, U("Защита сэмплера от слишком частых ударов, по темпу хоста. 0 = выкл"));
-    rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("выкл") : juce::String((int)v); };
-    addCombo("Вывод", "p_output", {"Один трек", "Трек на слой"}, 2, "Трек на слой удобен для отдельной громкости и разных звуков");
-
-    // ---- shared
-    addSlider("Длина, тактов", "bars", 3, U("Длина региона в тактах"), 1);
-    addSlider("Циклов", "cycles", 3, U("Сколько раз бесконечный круг умещается в регион. 0 = один свободный прогон"), 1);
+    addSlider("Длина, тактов", "bars", 2, U("Длина региона в тактах"));
+    addSlider("Циклов", "cycles", 2, U("Сколько раз бесконечный круг умещается в регион. 0 = один свободный прогон"));
     rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("свободно") : juce::String((int)v); };
-    addCombo("Шаг (свободно)", "stepLen", {"1/4", "1/8", "1/8 триоль", "1/16", "1/16 триоль", "1/32", "1/32 триоль", "1/64"}, 1, "Длина шага, когда циклов 0");
+    // ================= tempo, advanced
+    addCombo("Ступеней на удвоение", "p_stages", {"2", "3", "4", "6", "8"}, 2, "Только для ступенчатого метода");
     rows.getLast()->group = 1;
     addSlider("Цикл, тактов", "cycleBars", 2, U("Длина цикла, когда циклов 0"), 1);
-    addSlider("Темп", "previewBpm", 3, U("Темп прослушивания, когда выключен «Темп проекта» или хост его не сообщает. В файл темп не влияет на ноты"), 1);
+    addSlider("Нота", "p_note", 2, U("Нота, которой пишутся удары"), 1); noteText(*rows.getLast()->slider);
+    addCombo("Старт", "p_start", {"Авто", "Точный", "Выровненный"}, 2, "Выровненный: все слои совпадают на начале цикла. Точный: стартовая скорость ровно 1");
+    rows.getLast()->group = 1;
+    addSlider("Velocity мин", "p_vmin", 2, U("Самая тихая нота"), 1);
+    addSlider("Velocity макс", "p_vmax", 2, U("Самая громкая нота"), 1);
+    addSlider("Кривая", "p_gamma", 2, U("Подбирайте на слух под библиотеку"), 1);
+    rows.getLast()->slider->setNumDecimalPlacesToDisplay(2);
+    addSlider("Нижний порог", "p_floor", 2, U("Удары тише этого уровня не пишутся"), 1);
+    rows.getLast()->slider->setNumDecimalPlacesToDisplay(3);
+    addCombo("Длина ноты", "p_lenMode", {"Пропорциональная", "Фиксированная"}, 2, "Фиксированная лучше для сэмплов вроде щипков и часов");
+    rows.getLast()->group = 1;
+    addSlider("Доля интервала, %", "p_gate", 2, U("Для пропорциональной длины"), 1);
+    addSlider("Тиков", "p_ticks", 2, U("Для фиксированной длины, 960 тиков = четверть"), 1);
+    addSlider("Макс. ударов в сек", "p_maxPerSec", 2, U("Защита сэмплера от слишком частых ударов, по темпу хоста. 0 = выкл"), 1);
+    rows.getLast()->slider->textFromValueFunction = [](double v) { return v < 1 ? U("выкл") : juce::String((int)v); };
+    addCombo("Вывод", "p_output", {"Один трек", "Трек на слой"}, 2, "Трек на слой удобен для отдельной громкости и разных звуков");
+    rows.getLast()->group = 1;
+
+    // ================= both, advanced
+    addSlider("Темп прослушивания", "previewBpm", 3, U("Темп для кнопки «Слушать», когда выключен «Темп проекта» или хост его не сообщает. На ноты в файле не влияет"), 1);
     addToggle("Темп проекта", "hostTempo", 3, U("Включено: темп берётся из проекта"), 1);
     addToggle("Размер проекта", "hostMeter", 3, U("Включено: размер берётся из проекта"), 1);
     addSlider("Размер, доли", "meterNum", 3, U("Числитель размера, когда не из проекта"), 1);
@@ -289,9 +344,13 @@ StbEditor::StbEditor(StbProcessor& p)
     addChildComponent(gridMinus); addChildComponent(gridPlus);
     gridEdit.setTooltip(U("Клик по клетке: уровень 0, 1, 2, 3. Правый клик в обратную сторону"));
 
+    advBtn.setTooltip(U("Остальные параметры. Профиль и значения по умолчанию подходят для большинства случаев."));
+    advBtn.onClick = [this]() { advOpen_ = !advOpen_; refreshMode(); };
+    addAndMakeVisible(advBtn);
+
     play.setButtonText(U("Слушать"));
     play.getProperties().set("icon", "play");
-    play.setTooltip(U("Прослушать регион: синусом для тонального режима, кликом для темпового"));
+    play.setTooltip(U("Прослушать регион: синусом для тонального режима (с той же огибающей, что уйдёт в файл), кликом для темпового"));
     play.onClick = [this]() {
         const bool on = !proc.isPreviewing();
         proc.setPreview(on);
@@ -310,17 +369,26 @@ StbEditor::StbEditor(StbProcessor& p)
     };
     addAndMakeVisible(save);
     card.title = U("MIDI в трек");
-    card.setTooltip(U("Потяните карточку на трек Logic. Регион нужной длины создастся сам, ноты лежат в долях такта и не зависят от темпа."));
+    card.setTooltip(U("Потяните карточку на пустое место в Logic: создадутся треки (по одному на голос). Назначьте на них один и тот же инструмент. Ноты лежат в долях такта и не зависят от темпа."));
     addAndMakeVisible(card);
 
     StbLook::sectionLabel(settingsHead, U("Параметры"));
-    StbLook::sectionLabel(sharedHead, U("Регион и темп"));
     addAndMakeVisible(settingsHead);
-    addAndMakeVisible(sharedHead);
 
-    for (auto* r : rows) if (r->slider) r->slider->updateText();
+    for (auto* r : rows) if (r->slider && r->id != "range") r->slider->updateText();
+    // the bars slider shows the length that is really written when whole loops are on
+    for (auto* r : rows)
+        if (r->id == "bars" && r->slider) {
+            auto* sl = r->slider.get();
+            sl->textFromValueFunction = [this](double v) {
+                if (proc.mode() == 0) {
+                    auto vw = proc.view();
+                    if (vw && vw->bars > 0 && proc.params.getRawParameterValue("t_whole")->load() > 0.5f) return juce::String(vw->bars);
+                }
+                return juce::String((int)v);
+            };
+        }
     proc.onChanged = [this]() { triggerAsyncUpdate(); };
-    setSize(1120, 780);
     startTimerHz(15);
     refreshMode();
 }
@@ -332,36 +400,45 @@ StbEditor::~StbEditor() {
     setLookAndFeel(nullptr);
 }
 
-bool StbEditor::rowVisible(const Row& r) const {
+bool StbEditor::rowApplies(const Row& r) const {
     const int m = shownMode_ < 0 ? 0 : shownMode_;
     if (!(r.mask & (m == 0 ? 1 : 2))) return false;
-    const int cyc = (int)std::lround(proc.params.getRawParameterValue("cycles")->load());
-    if (r.id == "stepLen") return m == 0 && cyc == 0;
-    if (r.id == "cycleBars") return m == 1 && cyc == 0;
+    auto pv = [&](const char* id) { return (int)std::lround(proc.params.getRawParameterValue(id)->load()); };
     if (m == 0) {
-        const bool cc = proc.params.getRawParameterValue("t_cc11")->load() > 0.5f;
-        const int out = (int)std::lround(proc.params.getRawParameterValue("t_output")->load());
-        if (r.id == "t_regTracks") return out == 1 && !cc;
-        if (r.id == "t_ccVel") return cc;
-        if (r.id == "t_thr" || r.id == "t_vmin" || r.id == "t_vmax" || r.id == "t_gamma") return !cc;
-        if (r.id == "t_output") return !cc;
-        if (r.id == "t_spreadPct") return (int)std::lround(proc.params.getRawParameterValue("t_spread")->load()) != 0;
+        const bool voices = pv("t_layout") == 1;
+        const int ctl = pv("t_ctl");
+        if (r.id == "t_tonic") return pv("t_set") != 0;
+        if (r.id == "t_thr") return !voices && ctl == 0;
+        if (r.id == "t_edge") return voices && ctl == 1;
+        if (r.id == "t_ccVel") return voices && ctl != 0;
+        if (r.id == "t_vmin") return ctl != 2;
     } else {
-        const bool st = (int)std::lround(proc.params.getRawParameterValue("p_method")->load()) == 1;
-        const bool fixedLen = (int)std::lround(proc.params.getRawParameterValue("p_lenMode")->load()) == 1;
+        const bool st = pv("p_method") == 1;
+        const bool fixedLen = pv("p_lenMode") == 1;
         if (r.id == "p_stages") return st;
         if (r.id == "p_gate") return !fixedLen;
         if (r.id == "p_ticks") return fixedLen;
+        if (r.id == "cycleBars") return pv("cycles") == 0;
     }
-    if (r.id == "meterNum" || r.id == "meterDen")
-        return proc.params.getRawParameterValue("hostMeter")->load() < 0.5f;
+    if (r.id == "meterNum" || r.id == "meterDen") return proc.params.getRawParameterValue("hostMeter")->load() < 0.5f;
     return true;
 }
+
+bool StbEditor::rowVisible(const Row& r) const { return rowApplies(r) && (r.group == 0 || advOpen_); }
 
 int StbEditor::visibleRows() const {
     int n = 0;
     for (auto* r : rows) if (rowVisible(*r)) ++n;
     return n;
+}
+
+int StbEditor::wantedHeight() const {
+    int main = 0, adv = 0;
+    for (auto* r : rows) if (rowApplies(*r)) (r->group == 0 ? main : adv)++;
+    int h = 44 + 220 + 24 + 22 + ((main + 1) / 2) * 28 + 10 + 30;
+    if (shownMode_ == 1) h += 48;
+    if (advOpen_) h += 8 + ((adv + 1) / 2) * 28;
+    return h + 14 + 76 + 14;
 }
 
 void StbEditor::refreshMode() {
@@ -374,18 +451,37 @@ void StbEditor::refreshMode() {
         const bool v = rowVisible(*r);
         r->label.setVisible(v && !r->toggle);
         r->control()->setVisible(v);
+        if (r->valueText) r->valueText->setVisible(v);
     }
     const bool tempo = shownMode_ == 1;
     gridEdit.setVisible(tempo);
     gridLabel.setVisible(tempo);
     gridMinus.setVisible(tempo);
     gridPlus.setVisible(tempo);
+    advBtn.setButtonText(U(advOpen_ ? "Дополнительно  \xE2\x96\xBE" : "Дополнительно  \xE2\x96\xB8"));
+    // keep the range slider and the displayed bars in step with the parameters
+    for (auto* r : rows) {
+        if (r->id == "range") {
+            const int lo = (int)std::lround(proc.params.getRawParameterValue("t_low")->load());
+            const int hi = (int)std::lround(proc.params.getRawParameterValue("t_high")->load());
+            syncingRange_ = true;
+            r->slider->setMinAndMaxValues(lo, hi, juce::dontSendNotification);
+            syncingRange_ = false;
+            r->valueText->setText(noteName(lo) + " - " + noteName(hi), juce::dontSendNotification);
+        }
+        if (r->id == "bars" && r->slider) r->slider->updateText();
+    }
     auto vw = proc.view();
     if (vw) {
         juce::String s;
+        const double bpm = vw->tr.bpm;
         if (vw->mode == 0) {
-            const int steps = shp::tonalStepsPerCycle(vw->tonal);
-            s = U("Шагов в цикле: ") + juce::String(steps) + U(", нот в файле: ") + juce::String((int)vw->score.noteCount());
+            const double ms = (double)vw->tonal.stepTicks * 60000.0 / ((double)shp::kTpb * bpm);
+            const double cycBars = (double)vw->cycleTicks / (double)vw->tr.barTicks();
+            if (vw->voices > 0) s = U("Голосов: ") + juce::String(vw->voices) + U(", ");
+            s += U("цикл ") + juce::String(cycBars, 2) + U(" такта, регион ") + juce::String(vw->bars) + U(" тактов, шаг около ") +
+                 juce::String((int)std::lround(ms)) + U(" мс, нот: ") + juce::String((int)vw->score.noteCount());
+            if (!vw->closed) s += U(". Петля не замкнута: включите «Целое число циклов» или подберите длину");
         } else {
             const auto c = shp::tempoCycle(vw->tempo);
             s = U("Нот в файле: ") + juce::String((int)vw->score.noteCount()) + U(", цикл ") + juce::String(c.cycleBars, 2) +
@@ -394,14 +490,14 @@ void StbEditor::refreshMode() {
         infoLabel.setText(s, juce::dontSendNotification);
         card.subtitle = proc.fileBaseName();
     }
-    resized();
+    const int h = wantedHeight();
+    if (getHeight() != h || getWidth() != 1120) setSize(1120, h);
+    else resized();
     repaint();
 }
 
 void StbEditor::timerCallback() {
     if (proc.isPreviewing()) graph.repaint();
-    if (rowVisible(*rows[0]) != rows[0]->control()->isVisible()) refreshMode();
-    // visibility of dependent rows follows the parameters
     bool changed = false;
     for (auto* r : rows) if (rowVisible(*r) != r->control()->isVisible()) { changed = true; break; }
     if (changed) refreshMode();
@@ -430,17 +526,18 @@ void StbEditor::layoutRows(juce::Rectangle<int> area, int group) {
     for (auto* r : rows) if (r->group == group && rowVisible(*r)) vis.push_back(r);
     const int rowH = 28;
     const int colW = (area.getWidth() - 24) / 2;
-    int col = 0, rowIdx = 0;
-    const int perColUse = (int)std::ceil((double)vis.size() / 2.0);
+    const int perCol = (int)std::ceil((double)vis.size() / 2.0);
+    int idx = 0;
     for (auto* r : vis) {
-        if (rowIdx >= perColUse && col == 0) { col = 1; rowIdx = 0; }
-        auto cell = juce::Rectangle<int>(area.getX() + col * (colW + 24), area.getY() + rowIdx * rowH, colW, rowH - 2);
+        const int col = idx / std::max(1, perCol), row = idx % std::max(1, perCol);
+        auto cell = juce::Rectangle<int>(area.getX() + col * (colW + 24), area.getY() + row * rowH, colW, rowH - 2);
         if (r->toggle) r->toggle->setBounds(cell);
         else {
             r->label.setBounds(cell.removeFromLeft(130));
+            if (r->valueText) r->valueText->setBounds(cell.removeFromRight(96));
             r->control()->setBounds(cell);
         }
-        ++rowIdx;
+        ++idx;
     }
 }
 
@@ -449,17 +546,16 @@ void StbEditor::resized() {
     auto top = b.removeFromTop(44);
     tabTonal.setBounds(top.getX() + 300, 8, 110, 28);
     tabTempo.setBounds(top.getX() + 416, 8, 110, 28);
-    graphArea = b.removeFromTop(230);
+    graphArea = b.removeFromTop(220);
     graph.setBounds(graphArea);
     infoLabel.setBounds(b.removeFromTop(24));
-    bottomArea = b.removeFromBottom(130);
-    b.removeFromBottom(8);
-    // settings: two columns, grid editor above them in the tempo mode
+    bottomArea = b.removeFromBottom(76 + 14);
+    bottomArea.removeFromBottom(14);
     auto s = b;
     settingsHead.setBounds(s.removeFromTop(18));
     s.removeFromTop(4);
     if (shownMode_ == 1) {
-        auto gr = s.removeFromTop(44);
+        auto gr = s.removeFromTop(48);
         gridLabel.setBounds(gr.removeFromLeft(130).withHeight(28));
         auto btn = gr.removeFromRight(72);
         gridMinus.setBounds(btn.removeFromLeft(34).withHeight(28));
@@ -468,15 +564,19 @@ void StbEditor::resized() {
         gr.removeFromRight(8);
         gridEdit.setBounds(gr.withHeight(36));
     }
-    layoutRows(s, 0);
-    // bottom strip
-    auto bt = bottomArea;
-    auto right = bt.removeFromRight(300);
-    sharedHead.setBounds(bt.removeFromTop(18));
-    bt.removeFromTop(4);
-    layoutRows(bt.removeFromLeft(740), 1);
-    play.setBounds(right.removeFromTop(36).removeFromLeft(140));
-    save.setBounds(play.getBounds().translated(150, 0).withWidth(150));
-    right.removeFromTop(12);
-    card.setBounds(right.removeFromTop(64));
+    int mainCount = 0, advCount = 0;
+    for (auto* r : rows) if (rowApplies(*r)) (r->group == 0 ? mainCount : advCount)++;
+    layoutRows(s.removeFromTop(((mainCount + 1) / 2) * 28), 0);
+    s.removeFromTop(10);
+    advBtn.setBounds(s.removeFromTop(30).removeFromLeft(170));
+    if (advOpen_) {
+        s.removeFromTop(8);
+        layoutRows(s.removeFromTop(((advCount + 1) / 2) * 28), 1);
+    }
+    // bottom strip: audition, save, the card to drag
+    auto bt = bottomArea.withTrimmedTop(8);
+    play.setBounds(bt.removeFromLeft(140).withHeight(40).translated(0, 12));
+    bt.removeFromLeft(10);
+    save.setBounds(bt.removeFromLeft(160).withHeight(40).translated(0, 12));
+    card.setBounds(bt.removeFromRight(360).withHeight(64));
 }

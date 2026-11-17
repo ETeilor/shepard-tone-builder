@@ -67,17 +67,52 @@ int main(int argc, char** argv) {
         p.prepareToPlay(sr, 512);
         auto v = p.view();
         expect(v && v->mode == 0 && v->score.noteCount() > 0, "tonal default builds notes");
-        expect(v->score.tracks.size() == 1, "tonal picture is one track");
+        expect(v->voices == 4 && v->score.tracks.size() == 4, "default profile: four voice tracks");
+        expect(v->bars == 12 && v->regionTicks == 12 * v->tr.barTicks() && v->closed, "8 bars requested, whole loops make it 12");
+        set(p, "t_whole", 0);
         set(p, "bars", 4);
-        set(p, "cycles", 1);
         v = p.view();
-        expect(v->regionTicks == 4 * v->tr.barTicks(), "region is 4 bars");
+        expect(v->regionTicks == 4 * v->tr.barTicks() && !v->closed, "whole loops off: region is 4 bars and not closed");
+        set(p, "t_whole", 1);
         set(p, "mode", 1);
         v = p.view();
         expect(v->mode == 1 && v->score.noteCount() > 0, "tempo default builds notes");
         expect(v->score.tracks.size() == 4, "tempo picture has a track per layer");
         set(p, "p_layers", 6);
         expect(p.view()->score.tracks.size() == 6, "layers parameter");
+    }
+
+    std::cout << "tonal profiles\n";
+    {
+        StbProcessor p;
+        auto prof = [&] { return (int)std::lround(p.params.getRawParameterValue("t_profile")->load()); };
+        expect(prof() == 1 && p.tonalSettings().layout == shp::layoutVoices && p.tonalSettings().control == shp::ctlCc1, "default is strings legato CC1");
+        set(p, "t_profile", 0);
+        auto ts = p.tonalSettings();
+        expect(prof() == 0 && ts.layout == shp::layoutChord && ts.control == shp::ctlVelocity && ts.articulation == shp::artStaccato, "profile Synth writes its values");
+        expect(p.view()->score.tracks.size() == 1 && p.view()->voices == 0, "Synth: one track of chords");
+        set(p, "t_profile", 2);
+        ts = p.tonalSettings();
+        expect(prof() == 2 && ts.control == shp::ctlCc11 && !ts.edgeFade, "profile strings CC11");
+        p.rebuild();
+        bool only11 = true;
+        for (auto& t : p.view()->score.tracks) for (auto& c : t.ccs) if (c.cc != 11) only11 = false;
+        expect(only11, "CC11 profile writes only CC11");
+        set(p, "t_vmax", 100);
+        expect(prof() == 3, "editing a hidden value turns the profile into Custom");
+        set(p, "t_profile", 1);
+        expect(p.tonalSettings().vmax == 115 && prof() == 1, "choosing a profile restores its values");
+        set(p, "t_low", 36);
+        set(p, "t_high", 96);
+        expect(prof() == 1 && p.view()->voices == 5, "range is not part of a profile, 5 octaves give 5 voices");
+        set(p, "t_set", 5);
+        set(p, "t_interval", 2);
+        p.rebuild();
+        expect(p.view()->score.noteCount() > 0 && p.view()->closed, "major scale, interval 2, closed region");
+        // speed: step length changes the cycle, region stays whole
+        set(p, "t_low", 48); set(p, "t_high", 96); set(p, "t_set", 0); set(p, "t_interval", 1);
+        set(p, "stepLen", 3);   // 1/16
+        expect(p.view()->cycleTicks == 48 * 240 && p.view()->bars % 3 == 0, "1/16 step: 3-bar loop");
     }
 
     std::cout << "presets, grid and state\n";
@@ -124,7 +159,6 @@ int main(int argc, char** argv) {
         expect(notes == p.view()->score.noteCount(), "all notes are in the file");
         auto f2 = p.writeMidiFile();
         expect(f2.getParentDirectory() != f.getParentDirectory(), "every drag goes to a fresh folder");
-        set(p, "t_cc11", 1);
         auto f3 = p.writeMidiFile();
         juce::MemoryBlock m3;
         f3.loadFileAsData(m3);
@@ -132,8 +166,9 @@ int main(int argc, char** argv) {
         shp::readMidi((const unsigned char*)m3.getData(), m3.getSize(), r3);
         size_t ccs = 0;
         for (auto& t : r3.tracks) ccs += t.ccs.size();
-        expect(ccs > 0 && r3.tracks.size() > 2, "CC11 writes controllers on tracks per octave");
-        set(p, "t_cc11", 0);
+        bool has1 = false, has11 = false;
+        for (auto& t : r3.tracks) for (auto& c : t.ccs) { if (c.cc == 1) has1 = true; if (c.cc == 11) has11 = true; }
+        expect(ccs > 0 && r3.tracks.size() == 5 && has1 && has11, "voice file: conductor plus 4 tracks with CC1 and CC11");
         set(p, "mode", 1);
         set(p, "p_output", 1);
         auto f4 = p.writeMidiFile();
@@ -213,26 +248,41 @@ int main(int argc, char** argv) {
         StbProcessor p;
         p.prepareToPlay(sr, 512);
         StbEditor ed(p);
-        ed.setSize(1120, 780);
-        expect(ed.visibleRows() > 10, "tonal rows are shown");
+        expect(ed.visibleRows() >= 7 && ed.visibleRows() <= 9, "tonal shows only the main rows");
         shot(ed, outDir, "tonal.png");
-        set(p, "t_cc11", 1);
+        ed.setAdvancedOpen(true);
         pump(100);
-        shot(ed, outDir, "tonal_cc11.png");
-        set(p, "t_cc11", 0);
-        set(p, "t_art", 1);
-        set(p, "bars", 4);
+        shot(ed, outDir, "tonal_advanced.png");
+        ed.setAdvancedOpen(false);
+        set(p, "t_profile", 0);
         pump(100);
-        shot(ed, outDir, "tonal_legato.png");
+        shot(ed, outDir, "tonal_synth.png");
+        set(p, "t_profile", 2);
+        set(p, "t_set", 5);
+        set(p, "t_dir", 1);
+        pump(100);
+        shot(ed, outDir, "tonal_cc11_major_down.png");
+        set(p, "t_set", 0);
+        set(p, "t_dir", 0);
+        set(p, "t_profile", 1);
+        pump(100);
+        p.setPreview(true);
+        pump(100);
+        shot(ed, outDir, "tonal_playing.png");
+        p.setPreview(false);
         set(p, "mode", 1);
         pump(100);
-        expect(ed.visibleRows() > 8, "tempo rows are shown");
+        expect(ed.visibleRows() >= 5 && ed.visibleRows() <= 7, "tempo shows only the main rows");
         shot(ed, outDir, "tempo.png");
         set(p, "p_method", 1);
         set(p, "p_layers", 6);
         set(p, "cycles", 0);
         pump(100);
         shot(ed, outDir, "tempo_stepped_free.png");
+        ed.setAdvancedOpen(true);
+        pump(100);
+        shot(ed, outDir, "tempo_advanced.png");
+        ed.setAdvancedOpen(false);
         p.setPreview(true);
         pump(100);
         shot(ed, outDir, "tempo_playing.png");

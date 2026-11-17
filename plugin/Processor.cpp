@@ -33,7 +33,7 @@ APVTS::ParameterLayout StbProcessor::makeLayout() {
     integer("bars", "Region bars", 1, shp::kMaxBars, 8);
     integer("cycles", "Cycles", 0, 64, 2);
     integer("cycleBars", "Cycle bars", 1, 64, 4);
-    choice("stepLen", "Step length", {"1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T", "1/64"}, 3);
+    choice("stepLen", "Step length", {"1/4", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T", "1/64"}, 1);
     integer("previewBpm", "Preview tempo", 40, 240, 100);
     flag("hostTempo", "Project tempo", true);
     flag("hostMeter", "Project meter", true);
@@ -49,25 +49,31 @@ APVTS::ParameterLayout StbProcessor::makeLayout() {
     }
     integer("t_tonic", "Tonic", 0, 11, 0);
     integer("t_interval", "Interval", 1, 7, 1);
-    integer("t_low", "Low note", 12, 120, 24);
-    integer("t_high", "High note", 12, 120, 108);
+    integer("t_low", "Low note", 12, 120, 48);
+    integer("t_high", "High note", 12, 120, 96);
     integer("t_center", "Bell centre", 0, 120, 0);
     real("t_width", "Bell width", 0.0f, 6.0f, 0.5f, 0.0f);
     choice("t_shape", "Bell shape", {"Cosine", "Gauss"}, 0);
-    choice("t_art", "Articulation", {"Staccato", "Legato"}, 0);
+    choice("t_art", "Articulation", {"Staccato", "Legato"}, 1);
     integer("t_gate", "Gate", 0, 200, 0);
     choice("t_spread", "Spread", {"Together", "Up", "Down", "Random"}, 0);
     integer("t_spreadPct", "Spread share", 0, 100, 50);
-    integer("t_vmin", "Velocity min", 1, 127, 12);
-    integer("t_vmax", "Velocity max", 1, 127, 120);
+    integer("t_vmin", "Velocity min", 1, 127, 20);
+    integer("t_vmax", "Velocity max", 1, 127, 115);
     real("t_gamma", "Velocity curve", 0.3f, 3.0f, 0.05f, 1.0f);
-    integer("t_thr", "Velocity threshold", 0, 60, 6);
+    integer("t_thr", "Velocity threshold", 0, 60, 0);
     integer("t_jitter", "Velocity jitter", 0, 30, 0);
     integer("t_seed", "Seed", 1, 99999, 1);
     choice("t_output", "Output", {"One track", "By register", "By octave"}, 0);
     integer("t_regTracks", "Register tracks", 2, 4, 3);
     flag("t_cc11", "CC11", false);
     integer("t_ccVel", "CC11 velocity", 1, 127, 96);
+    // added in 0.2
+    choice("t_profile", "Profile", {"Synth", "Strings legato CC1", "Strings legato CC11", "Custom"}, 1);
+    choice("t_layout", "Layout", {"Chord per step", "Voice lines"}, 1);
+    choice("t_ctl", "Dynamics by", {"Velocity", "CC1", "CC11"}, 1);
+    flag("t_edge", "Silent edges (CC11)", true);
+    flag("t_whole", "Whole loops", true);
 
     // tempo
     choice("p_method", "Method", {"Smooth", "Stepped"}, 0);
@@ -101,6 +107,8 @@ StbProcessor::StbProcessor()
         if (auto* pp = dynamic_cast<juce::RangedAudioParameter*>(p)) params.addParameterListener(pp->paramID, this);
     params.state.setProperty("grid", "3222", nullptr);
     lastPreset_ = 0;
+    lastProfile_ = 1;
+    for (int i = 0; i < kTracks; ++i) gain1_[i] = gain11_[i] = cur_[i] = 1.0f;
     rebuild();
 }
 
@@ -159,9 +167,13 @@ shp::TonalSettings StbProcessor::tonalSettings() const {
     s.registerTracks = iv(params, "t_regTracks");
     s.cc11 = iv(params, "t_cc11") != 0;
     s.ccVelocity = iv(params, "t_ccVel");
-    s.lengthBars = iv(params, "bars");
-    s.cycles = iv(params, "cycles");
+    s.cycles = 0;                                  // the step length decides, loops are counted from it
     s.stepTicks = stbStepTicks(iv(params, "stepLen"));
+    s.layout = iv(params, "t_layout");
+    s.control = iv(params, "t_ctl");
+    s.edgeFade = iv(params, "t_edge") != 0;
+    s.lengthBars = iv(params, "bars");
+    if (iv(params, "t_whole") != 0) s.lengthBars = shp::tonalWholeCycleBars(s, transport(), s.lengthBars);
     return s;
 }
 
@@ -213,6 +225,43 @@ void StbProcessor::setParamValue(const char* id, float value) {
 
 void StbProcessor::handleAsyncUpdate() { rebuild(); }
 
+namespace {
+struct Profile { int layout, ctl, art, gate, vmin, vmax; double gamma; int thr, edge; };
+const Profile kProfiles[3] = {
+    {0, 0, 0, 0, 12, 120, 1.0, 6, 1},     // Synth: a chord of octaves per step, velocity
+    {1, 1, 1, 0, 20, 115, 1.0, 0, 1},     // Strings legato, mod wheel (CC1), CC11 closes the edges
+    {1, 2, 1, 0, 1, 115, 1.0, 0, 0},      // Strings legato, expression (CC11) carries the bell
+};
+}  // namespace
+
+bool StbProcessor::matchesProfile(int profile) const {
+    if (profile < 0 || profile > 2) return true;
+    const auto& p = kProfiles[profile];
+    return iv(params, "t_layout") == p.layout && iv(params, "t_ctl") == p.ctl && iv(params, "t_art") == p.art &&
+           iv(params, "t_gate") == p.gate && iv(params, "t_vmin") == p.vmin && iv(params, "t_vmax") == p.vmax &&
+           std::fabs(fv(params, "t_gamma") - p.gamma) < 0.026 && iv(params, "t_thr") == p.thr && iv(params, "t_edge") == p.edge;
+}
+
+void StbProcessor::applyProfile(int profile) {
+    if (profile < 0 || profile > 2) return;
+    const auto& p = kProfiles[profile];
+    applying_ = true;
+    setParamValue("t_layout", (float)p.layout);
+    setParamValue("t_ctl", (float)p.ctl);
+    setParamValue("t_art", (float)p.art);
+    setParamValue("t_gate", (float)p.gate);
+    setParamValue("t_vmin", (float)p.vmin);
+    setParamValue("t_vmax", (float)p.vmax);
+    setParamValue("t_gamma", (float)p.gamma);
+    setParamValue("t_thr", (float)p.thr);
+    setParamValue("t_edge", (float)p.edge);
+    setParamValue("t_cc11", 0.0f);
+    setParamValue("t_output", 0.0f);
+    setParamValue("t_spread", 0.0f);
+    setParamValue("t_jitter", 0.0f);
+    applying_ = false;
+}
+
 void StbProcessor::rebuild() {
     // a pattern preset overwrites the grid only when the choice itself was changed
     const int preset = iv(params, "p_preset");
@@ -225,6 +274,17 @@ void StbProcessor::rebuild() {
             params.state.setProperty("grid", s, nullptr);
         }
     }
+    // the same for the tonal profile; editing a value behind it turns the profile into "Custom"
+    if (!applying_) {
+        const int profile = iv(params, "t_profile");
+        if (profile != lastProfile_) {
+            lastProfile_ = profile;
+            applyProfile(profile);
+        } else if (profile < 3 && !matchesProfile(profile)) {
+            lastProfile_ = 3;
+            setParamValue("t_profile", 3.0f);
+        }
+    }
     auto v = std::make_shared<View>();
     v->mode = mode();
     v->tr = transport();
@@ -232,10 +292,13 @@ void StbProcessor::rebuild() {
     v->tempo = tempoSettings();
     if (v->mode == 0) {
         auto ts = v->tonal;
-        ts.output = shp::outSingle;
-        ts.cc11 = false;
+        if (ts.layout == shp::layoutChord) { ts.output = shp::outSingle; ts.cc11 = false; }
         v->score = shp::buildTonal(ts, v->tr);
-        v->cycles = ts.cycles;
+        v->cycles = 0;
+        v->voices = ts.layout == shp::layoutVoices ? shp::tonalVoiceCount(ts) : 0;
+        v->cycleTicks = shp::tonalCycleTicks(ts);
+        v->bars = ts.lengthBars;
+        v->closed = v->cycleTicks > 0 && ((long long)ts.lengthBars * v->tr.barTicks()) % v->cycleTicks == 0;
     } else {
         auto ps = v->tempo;
         ps.output = shp::toPerLayer;
@@ -245,10 +308,33 @@ void StbProcessor::rebuild() {
     v->regionTicks = std::max<long long>(1, v->score.lengthTicks);
     int layer = 0;
     for (auto& t : v->score.tracks) {
-        for (auto& n : t.notes) v->events.push_back({n.tick, n.length, n.note, n.velocity, layer});
+        // level of the voice at a tick: the controllers that are in force, or the velocity
+        std::vector<std::pair<long long, int>> c1, c11;
+        for (auto& c : t.ccs) (c.cc == 1 ? c1 : c11).push_back({c.tick, c.value});
+        auto at = [](const std::vector<std::pair<long long, int>>& v, long long tick, int dflt) {
+            auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(tick, 1000));
+            return it == v.begin() ? dflt : std::prev(it)->second;
+        };
+        const bool has1 = !c1.empty(), has11 = !c11.empty();
+        for (auto& n : t.notes) {
+            PreviewEvent e{n.tick, n.length, n.note, n.velocity, layer, 0, 1.0f};
+            if (has1 || has11) {
+                const long long mid = n.tick + n.length / 2;
+                const float a = has1 ? std::pow(at(c1, mid, 127) / 127.0f, 1.5f) : 1.0f;
+                const float b = has11 ? (float)at(c11, mid, 127) / 127.0f : 1.0f;
+                e.level = a * b;
+            } else {
+                e.level = (float)n.velocity / 127.0f;
+            }
+            v->events.push_back(e);
+        }
+        for (auto& c : t.ccs) v->events.push_back({c.tick, 0, c.cc, c.value, layer, 1, 1.0f});
         ++layer;
     }
-    std::sort(v->events.begin(), v->events.end(), [](const PreviewEvent& a, const PreviewEvent& b) { return a.tick < b.tick; });
+    std::stable_sort(v->events.begin(), v->events.end(), [](const PreviewEvent& a, const PreviewEvent& b) {
+        if (a.tick != b.tick) return a.tick < b.tick;
+        return a.kind > b.kind;           // controllers first, so a note starts at the level that belongs to it
+    });
     std::atomic_store(&view_, std::shared_ptr<const View>(v));
     if (onChanged) onChanged();
 }
@@ -258,7 +344,8 @@ juce::String StbProcessor::fileBaseName() const {
     if (mode() == 0) {
         auto t = tonalSettings();
         s = juce::String("Shepard tonal ") + (t.direction == shp::dirUp ? "up " : "down ") + juce::String(t.lengthBars) + " bars";
-        if (t.cc11) s += " CC11";
+        if (t.layout == shp::layoutVoices) s += t.control == shp::ctlCc11 ? " voices CC11" : t.control == shp::ctlCc1 ? " voices CC1" : " voices";
+        else if (t.cc11) s += " CC11";
     } else {
         auto t = tempoSettings();
         s = juce::String("Risset ") + (t.method == shp::methodSmooth ? "smooth " : "stepped ") +
@@ -302,6 +389,7 @@ void StbProcessor::setStateInformation(const void* data, int size) {
         params.replaceState(juce::ValueTree::fromXml(*st));
         if (!params.state.hasProperty("grid")) params.state.setProperty("grid", "3222", nullptr);
         lastPreset_ = iv(params, "p_preset");
+        lastProfile_ = iv(params, "t_profile");
     }
     rebuild();
 }
@@ -317,6 +405,7 @@ void StbProcessor::setPreview(bool on) {
 void StbProcessor::prepareToPlay(double sr, int) {
     sampleRate_ = sr;
     for (auto& v : voices_) v.on = false;
+    for (int i = 0; i < kTracks; ++i) gain1_[i] = gain11_[i] = cur_[i] = 1.0f;
 }
 
 void StbProcessor::startVoice(const PreviewEvent& e, bool click, double samplesPerTick) {
@@ -331,6 +420,7 @@ void StbProcessor::startVoice(const PreviewEvent& e, bool click, double samplesP
     v->phase = 0;
     v->env = 0;
     v->held = true;
+    v->track = std::clamp(e.layer, 0, kTracks - 1);
     const float vel = (float)e.velocity / 127.0f;
     if (click) {
         static const double freq[8] = {1100, 700, 1700, 2500, 900, 1300, 2000, 3000};
@@ -342,7 +432,7 @@ void StbProcessor::startVoice(const PreviewEvent& e, bool click, double samplesP
     } else {
         const double hz = 440.0 * std::pow(2.0, (e.note - 69) / 12.0);
         v->inc = 2.0 * juce::MathConstants<double>::pi * hz / sampleRate_;
-        v->amp = 0.09f * std::pow(vel, 1.5f);
+        v->amp = 0.07f * std::pow(vel, 1.5f);
         v->left = std::max<long long>(32, (long long)(e.length * samplesPerTick));
     }
 }
@@ -365,7 +455,10 @@ void StbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&
     double spt = 0;
     const bool click = vw && vw->mode == 1;
     if (previewOn_.load() && vw && !vw->events.empty()) {
-        if (restart_.exchange(false)) tick_ = 0;
+        if (restart_.exchange(false)) {
+            tick_ = 0;
+            for (int i = 0; i < kTracks; ++i) { gain1_[i] = gain11_[i] = 1.0f; cur_[i] = 0.0f; }
+        }
         const double tps = effectiveBpm() * shp::kTpb / (60.0 * sampleRate_);   // ticks per sample
         spt = 1.0 / tps;
         const double t0 = tick_, t1 = tick_ + tps * n, len = (double)vw->regionTicks;
@@ -388,7 +481,18 @@ void StbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&
     auto* r = buf.getNumChannels() > 1 ? buf.getWritePointer(1) : nullptr;
     int hi = 0;
     for (int i = 0; i < n; ++i) {
-        while (hi < nh && hits[hi].at <= i) { startVoice(hits[hi].e, click, spt); ++hi; }
+        while (hi < nh && hits[hi].at <= i) {
+            const auto& e = hits[hi].e;
+            if (e.kind == 1) {
+                const int tr = std::clamp(e.layer, 0, kTracks - 1);
+                if (e.note == 1) gain1_[tr] = std::pow((float)e.velocity / 127.0f, 1.5f);
+                else if (e.note == 11) gain11_[tr] = (float)e.velocity / 127.0f;
+            } else {
+                startVoice(e, click, spt);
+            }
+            ++hi;
+        }
+        for (int t = 0; t < kTracks; ++t) cur_[t] += (gain1_[t] * gain11_[t] - cur_[t]) * 0.004f;
         float out = 0;
         for (auto& v : voices_) {
             if (!v.on) continue;
@@ -399,7 +503,7 @@ void StbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&
             } else {
                 if (v.left > 0) { v.env = std::min(1.0f, v.env + 1.0f / 220.0f); --v.left; }
                 else { v.env -= 1.0f / 1800.0f; if (v.env <= 0) { v.on = false; continue; } }
-                out += std::sin((float)v.phase) * v.env * v.amp;
+                out += std::sin((float)v.phase) * v.env * v.amp * cur_[v.track];
             }
             v.phase += v.inc;
             if (v.phase > 6.283185307179586) v.phase -= 6.283185307179586;

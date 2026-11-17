@@ -44,6 +44,11 @@ int main(int argc, char** argv) {
         s.registerTracks = (int)num("regtracks", 3);
         s.cc11 = num("cc11", 0) != 0; s.ccVelocity = (int)num("ccvel", 96);
         s.lengthBars = (int)num("bars", 8); s.cycles = (int)num("cycles", 2); s.stepTicks = (int)num("step", 240);
+        s.layout = str("layout", "chord") == "voices" ? layoutVoices : layoutChord;
+        const std::string ct = str("control", "vel");
+        s.control = ct == "cc1" ? ctlCc1 : ct == "cc11" ? ctlCc11 : ctlVelocity;
+        s.edgeFade = num("edge", 1) != 0;
+        if (s.layout == layoutVoices && num("whole", 1) != 0) s.lengthBars = tonalWholeCycleBars(s, tr, s.lengthBars);
         sc = buildTonal(s, tr);
     } else if (mode == "tempo") {
         TempoSettings s;

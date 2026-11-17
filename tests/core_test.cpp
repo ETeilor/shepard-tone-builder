@@ -199,6 +199,123 @@ static TempoSettings example() {
     return s;
 }
 
+static void testVoices() {
+    Transport tr; tr.num = 4; tr.den = 4; tr.bpm = 120;
+    auto base = [] {
+        TonalSettings s;
+        s.layout = layoutVoices; s.control = ctlCc1; s.articulation = artLegato;
+        s.low = 48; s.high = 96; s.stepTicks = 480; s.vmin = 20; s.vmax = 115; s.ccVelocity = 96; s.threshold = 0;
+        return s;
+    };
+    {
+        auto s = base();
+        expect(tonalVoiceCount(s) == 4, "voices: 4 octaves give 4 voices");
+        expect(tonalCycleTicks(s) == 48 * 480, "voices: chromatic cycle is 12 steps per octave of voices");
+        expect(tonalWholeCycleBars(s, tr, 8) == 12 && tonalWholeCycleBars(s, tr, 6) == 6 && tonalWholeCycleBars(s, tr, 1) == 6, "whole cycles: 6-bar unit at 1/8 in 4/4");
+        s.lengthBars = 6;
+        auto sc = buildTonal(s, tr);
+        expect(sc.tracks.size() == 4, "voices: one track per voice");
+        bool ok = true, inRange = true, mono = true, pcOk = true;
+        for (auto& t : sc.tracks) {
+            ok = ok && t.notes.size() == 48 && !t.ccs.empty();
+            for (size_t i = 0; i < t.notes.size(); ++i) {
+                auto& n = t.notes[i];
+                inRange = inRange && n.note >= 48 && n.note < 96;
+                pcOk = pcOk && n.note % 12 == (int)((i * 1) % 12);    // chromatic from C, one step per note
+                if (i + 1 < t.notes.size()) mono = mono && n.tick + n.length <= t.notes[i + 1].tick + 30 && t.notes[i + 1].tick == n.tick + 480;
+            }
+        }
+        expect(ok, "voices: 48 notes per voice in 6 bars, controllers present");
+        expect(inRange, "voices: notes stay inside the range");
+        expect(pcOk, "voices: pitch class follows the loop");
+        expect(mono, "voices: each track is one line, notes at the grid, overlap only the legato overlap");
+        // per-voice loop closure: the pitch after one cycle equals the pitch at the start, on the same track
+        auto s2 = s; s2.lengthBars = 12;
+        auto sc2 = buildTonal(s2, tr);
+        bool closed = true;
+        for (auto& t : sc2.tracks) closed = closed && t.notes.size() == 96 && t.notes[48].note == t.notes[0].note && t.notes[60].note == t.notes[12].note;
+        expect(closed, "voices: every voice is back on its note after one cycle");
+        // every voice crosses the whole range and wraps exactly once per cycle
+        int wraps = 0;
+        for (size_t i = 1; i < sc.tracks[1].notes.size(); ++i) if (sc.tracks[1].notes[i].note < sc.tracks[1].notes[i - 1].note) ++wraps;
+        expect(wraps == 1, "voices: one wrap per cycle on a track");
+        // bell: sum of the amplitudes of the voices is constant for the full-width cosine bell
+        auto bellSum = [&](int g) { double sum = 0; for (auto& t : sc.tracks) sum += tonalBellF([&] { auto b = s; b.high = b.low + 12 * 4; return b; }(), t.notes[(size_t)g].note); return sum; };
+        double lo = 99, hi = 0;
+        for (int g = 0; g < 48; ++g) { lo = std::min(lo, bellSum(g)); hi = std::max(hi, bellSum(g)); }
+        expect(hi - lo < 1e-6 && std::fabs(hi - 2.0) < 1e-6, "voices: voices of the cosine bell always add up to a constant level");
+        // controllers: CC1 and CC11 on every track, values in range, edge CC11 closed where the wrap happens
+        bool cc1 = true, cc11 = true, rng = true;
+        for (auto& t : sc.tracks) {
+            int n1 = 0, n11 = 0;
+            for (auto& c : t.ccs) { if (c.cc == 1) ++n1; if (c.cc == 11) ++n11; rng = rng && c.value >= 0 && c.value <= 127 && c.tick >= 0 && c.tick <= sc.lengthTicks; if (c.cc == 1) rng = rng && c.value >= 20 && c.value <= 115; }
+            cc1 = cc1 && n1 > 20; cc11 = cc11 && n11 > 5;
+        }
+        expect(cc1 && cc11 && rng, "voices: CC1 curve, CC11 edge fade and value ranges");
+        // at the wrap the voice is silent: CC11 is 0 around the tick where its pitch jumps
+        {
+            auto& t = sc.tracks[1];
+            long long wrapTick = -1;
+            for (size_t i = 1; i < t.notes.size(); ++i) if (t.notes[i].note < t.notes[i - 1].note) wrapTick = t.notes[i].tick;
+            int v11 = -1;
+            for (auto& c : t.ccs) if (c.cc == 11 && c.tick <= wrapTick) v11 = c.value;
+            expect(wrapTick > 0 && v11 == 0, "voices: the voice is silent (CC11 = 0) when its pitch wraps");
+        }
+        // CC11 as the carrier: values reach 0 at the edges and the control is the only one
+        auto s3 = s; s3.control = ctlCc11;
+        auto sc3 = buildTonal(s3, tr);
+        int zero = 0, only11 = 1;
+        for (auto& c : sc3.tracks[0].ccs) { if (c.value == 0) ++zero; if (c.cc != 11) only11 = 0; }
+        expect(zero > 0 && only11, "voices: CC11 carrier reaches zero and writes only CC11");
+        // edge fade off: no CC11
+        auto s4 = s; s4.edgeFade = false;
+        int c11 = 0;
+        for (auto& c : buildTonal(s4, tr).tracks[0].ccs) if (c.cc == 11) ++c11;
+        expect(c11 == 0, "voices: edge fade can be turned off");
+        // direction down mirrors: pitch goes down
+        auto s5 = s; s5.direction = dirDown;
+        auto sc5 = buildTonal(s5, tr);
+        int downs = 0;
+        for (size_t i = 1; i < 12; ++i) if (sc5.tracks[0].notes[i].note < sc5.tracks[0].notes[i - 1].note) ++downs;
+        expect(downs >= 10, "voices: direction down");
+        // tempo independence
+        Transport t2 = tr; t2.bpm = 60;
+        expect(sameNotes(sc, buildTonal(s, t2)), "voices: notes do not depend on bpm");
+        // other meter: ticks follow the bar
+        Transport t78; t78.num = 7; t78.den = 8;
+        auto s6 = s;
+        s6.lengthBars = tonalWholeCycleBars(s, t78, 6);
+        auto sc6 = buildTonal(s6, t78);
+        expect(sc6.lengthTicks == (long long)s6.lengthBars * t78.barTicks() && (sc6.lengthTicks % tonalCycleTicks(s)) == 0, "whole cycles also in 7/8");
+    }
+    // other sets: a voice crosses the range and closes
+    for (int set = 0; set < psNumSets; ++set)
+        for (int iv = 1; iv <= 5; ++iv) {
+            auto s = base(); s.pitchSet = set; s.interval = iv; s.low = 36; s.high = 84;
+            const long long cyc = tonalCycleTicks(s);
+            s.lengthBars = std::min(kMaxBars, 2 * tonalWholeCycleBars(s, tr, 2));
+            auto sc = buildTonal(s, tr);
+            const long long steps = cyc / 480;
+            bool ok = !sc.tracks.empty();
+            for (auto& t : sc.tracks) ok = ok && (long long)t.notes.size() > steps && t.notes[(size_t)steps].note == t.notes[0].note;
+            expect(ok, "voices: closes after a cycle, set " + str(set) + " interval " + str(iv));
+        }
+    // velocity carrier keeps notes with their own velocity and writes no controllers
+    {
+        auto s = base(); s.control = ctlVelocity; s.lengthBars = 6;
+        auto sc = buildTonal(s, tr);
+        bool noCc = true, vary = false;
+        for (auto& t : sc.tracks) { noCc = noCc && t.ccs.empty(); for (auto& n : t.notes) if (n.velocity != t.notes[0].velocity) vary = true; }
+        expect(noCc && vary, "voices: velocity carrier has no controllers and varying velocity");
+    }
+    // degenerate input
+    {
+        auto s = base(); s.low = 100; s.high = 101; s.lengthBars = 2; s.stepTicks = 1;
+        auto sc = buildTonal(s, tr);
+        expect(sc.tracks.size() >= 2, "voices: tiny range still gives voices");
+    }
+}
+
 static void testTempo() {
     std::printf("tempo\n");
     Transport tr;
@@ -345,6 +462,7 @@ static void testMidi() {
 
 int main() {
     testTonal();
+    testVoices();
     testTempo();
     testMidi();
     std::printf("%d checks, %d failed\n", checks, failures);

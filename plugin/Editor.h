@@ -47,6 +47,8 @@ public:
     void resized() override;
     // for the test runner
     int visibleRows() const;
+    void setAdvancedOpen(bool open) { advOpen_ = open; refreshMode(); }
+    int wantedHeight() const;
 private:
     struct Row {
         juce::Label label;
@@ -57,11 +59,13 @@ private:
         std::unique_ptr<juce::ComboBoxParameterAttachment> cAtt;
         std::unique_ptr<juce::ButtonParameterAttachment> bAtt;
         int mask = 3;                     // 1 tonal, 2 tempo
-        int group = 0;                    // 0 settings, 1 shared
+        int group = 0;                    // 0 main, 1 advanced
+        std::unique_ptr<juce::Label> valueText;   // range row only
         juce::String id;
         juce::Component* control() { return slider ? (juce::Component*)slider.get() : combo ? (juce::Component*)combo.get() : (juce::Component*)toggle.get(); }
     };
     Row& addSlider(const char* text, const char* id, int mask, const juce::String& tip, int group = 0);
+    void addRange();
     Row& addCombo(const char* text, const char* id, std::initializer_list<const char*> items, int mask, const juce::String& tip);
     Row& addToggle(const char* text, const char* id, int mask, const juce::String& tip, int group = 0);
     void timerCallback() override;
@@ -69,6 +73,7 @@ private:
     void refreshMode();
     void layoutRows(juce::Rectangle<int> area, int group);
     bool rowVisible(const Row&) const;
+    bool rowApplies(const Row&) const;
 
     StbProcessor& proc;
     StbLook look;
@@ -76,11 +81,12 @@ private:
     GraphView graph;
     GridEdit gridEdit;
     juce::OwnedArray<Row> rows;
-    juce::TextButton tabTonal, tabTempo, play, save, gridMinus, gridPlus;
-    juce::Label infoLabel, gridLabel, settingsHead, sharedHead;
+    juce::TextButton tabTonal, tabTempo, play, save, gridMinus, gridPlus, advBtn;
+    juce::Label infoLabel, gridLabel, settingsHead;
     DragCard card;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::Drawable> logo;
     int shownMode_ = -1;
-    juce::Rectangle<int> graphArea, setArea, sharedArea, bottomArea, gridArea;
+    bool advOpen_ = false, syncingRange_ = false;
+    juce::Rectangle<int> graphArea, bottomArea;
 };

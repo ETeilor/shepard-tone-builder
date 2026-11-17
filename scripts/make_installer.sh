@@ -5,7 +5,7 @@
 #   Shepard Tone Builder.app       -> /Applications
 # Result: dist/ShepardToneBuilder-<ver>.pkg and dist/ShepardToneBuilder-<ver>.dmg (the dmg holds the pkg and a readme).
 set -euo pipefail
-VER="${1:-0.1.0}"
+VER="${1:-0.2.0}"
 ART="build/ShepardToneBuilder_artefacts/Release"
 OUT="dist"
 WORK="$(mktemp -d)"

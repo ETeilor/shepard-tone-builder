@@ -43,6 +43,10 @@ enum PitchSetId { psChromatic, psWholeTone, psOctatonic, psMajorPent, psMinorPen
 enum Spread { spreadTogether, spreadUp, spreadDown, spreadRandom, spreadNumModes };
 enum Output { outSingle, outRegister, outOctave, outNumModes };
 enum BellShape { bellCosine, bellGauss, bellNumShapes };
+// layoutChord: at every step all octaves of the pitch sound together (the notes are placed on tracks by `output`).
+// layoutVoices: one track per octave voice, each a single rising line; the bell is a continuous controller curve.
+enum Layout { layoutChord, layoutVoices, layoutNumModes };
+enum Control { ctlVelocity, ctlCc1, ctlCc11, ctlNumModes };
 
 struct TonalSettings {
     int direction = dirUp;
@@ -69,6 +73,9 @@ struct TonalSettings {
     int lengthBars = 8;             // length of the region
     int cycles = 2;                 // loops inside the region; 0 = one free run with a fixed step
     int stepTicks = 240;            // step length when cycles == 0
+    int layout = layoutChord;
+    int control = ctlVelocity;      // voices layout: the bell goes to CC1 or CC11 (velocity = notes keep their own velocity)
+    bool edgeFade = true;           // CC1 control: CC11 closes the voice at the edges of the range so the wrap is silent
 };
 
 int pitchSetSize(int set);
@@ -80,6 +87,13 @@ int tonalStepsPerCycle(const TonalSettings& s);
 int tonalPitchClass(const TonalSettings& s, int step);
 // amplitude of a pitch under the bell, 0..1
 double tonalBell(const TonalSettings& s, int pitch);
+double tonalBellF(const TonalSettings& s, double pitch);
+// voices layout: one voice per octave of the range, 2..8
+int tonalVoiceCount(const TonalSettings& s);
+// ticks of one full loop at the step length (voices: until every voice is back on its own line)
+long long tonalCycleTicks(const TonalSettings& s);
+// region length in bars rounded up so that whole loops fit exactly; the request itself when that is impossible
+int tonalWholeCycleBars(const TonalSettings& s, const Transport& tr, int requestedBars);
 Score buildTonal(const TonalSettings& s, const Transport& tr);
 
 // ------------------------------------------------------------------ tempo
