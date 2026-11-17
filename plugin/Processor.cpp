@@ -74,6 +74,10 @@ APVTS::ParameterLayout StbProcessor::makeLayout() {
     choice("t_ctl", "Dynamics by", {"Velocity", "CC1", "CC11"}, 1);
     flag("t_edge", "Silent edges (CC11)", true);
     flag("t_whole", "Whole loops", true);
+    // added in 0.2.1
+    flag("t_glide", "Pitch glide", true);
+    real("t_bend", "Bend range", 0.1f, 12.0f, 0.1f, 0.5f);
+    integer("t_glideShare", "Glide width", 10, 200, 100);
 
     // tempo
     choice("p_method", "Method", {"Smooth", "Stepped"}, 0);
@@ -108,7 +112,7 @@ StbProcessor::StbProcessor()
     params.state.setProperty("grid", "3222", nullptr);
     lastPreset_ = 0;
     lastProfile_ = 1;
-    for (int i = 0; i < kTracks; ++i) gain1_[i] = gain11_[i] = cur_[i] = 1.0f;
+    for (int i = 0; i < kTracks; ++i) gain1_[i] = gain11_[i] = cur_[i] = 1.0f, bendMul_[i] = 1.0;
     rebuild();
 }
 
@@ -172,6 +176,9 @@ shp::TonalSettings StbProcessor::tonalSettings() const {
     s.layout = iv(params, "t_layout");
     s.control = iv(params, "t_ctl");
     s.edgeFade = iv(params, "t_edge") != 0;
+    s.glide = iv(params, "t_glide") != 0;
+    s.bendRange = fv(params, "t_bend");
+    s.glideShare = iv(params, "t_glideShare");
     s.lengthBars = iv(params, "bars");
     if (iv(params, "t_whole") != 0) s.lengthBars = shp::tonalWholeCycleBars(s, transport(), s.lengthBars);
     return s;
@@ -298,6 +305,7 @@ void StbProcessor::rebuild() {
         v->voices = ts.layout == shp::layoutVoices ? shp::tonalVoiceCount(ts) : 0;
         v->cycleTicks = shp::tonalCycleTicks(ts);
         v->bars = ts.lengthBars;
+        v->bendRange = ts.bendRange;
         v->closed = v->cycleTicks > 0 && ((long long)ts.lengthBars * v->tr.barTicks()) % v->cycleTicks == 0;
     } else {
         auto ps = v->tempo;
@@ -310,7 +318,7 @@ void StbProcessor::rebuild() {
     for (auto& t : v->score.tracks) {
         // level of the voice at a tick: the controllers that are in force, or the velocity
         std::vector<std::pair<long long, int>> c1, c11;
-        for (auto& c : t.ccs) (c.cc == 1 ? c1 : c11).push_back({c.tick, c.value});
+        for (auto& c : t.ccs) { if (c.cc == 1) c1.push_back({c.tick, c.value}); else if (c.cc == 11) c11.push_back({c.tick, c.value}); }
         auto at = [](const std::vector<std::pair<long long, int>>& v, long long tick, int dflt) {
             auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(tick, 1000));
             return it == v.begin() ? dflt : std::prev(it)->second;
@@ -405,7 +413,7 @@ void StbProcessor::setPreview(bool on) {
 void StbProcessor::prepareToPlay(double sr, int) {
     sampleRate_ = sr;
     for (auto& v : voices_) v.on = false;
-    for (int i = 0; i < kTracks; ++i) gain1_[i] = gain11_[i] = cur_[i] = 1.0f;
+    for (int i = 0; i < kTracks; ++i) gain1_[i] = gain11_[i] = cur_[i] = 1.0f, bendMul_[i] = 1.0;
 }
 
 void StbProcessor::startVoice(const PreviewEvent& e, bool click, double samplesPerTick) {
@@ -457,7 +465,7 @@ void StbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&
     if (previewOn_.load() && vw && !vw->events.empty()) {
         if (restart_.exchange(false)) {
             tick_ = 0;
-            for (int i = 0; i < kTracks; ++i) { gain1_[i] = gain11_[i] = 1.0f; cur_[i] = 0.0f; }
+            for (int i = 0; i < kTracks; ++i) { gain1_[i] = gain11_[i] = 1.0f; cur_[i] = 0.0f; bendMul_[i] = 1.0; }
         }
         const double tps = effectiveBpm() * shp::kTpb / (60.0 * sampleRate_);   // ticks per sample
         spt = 1.0 / tps;
@@ -487,6 +495,7 @@ void StbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&
                 const int tr = std::clamp(e.layer, 0, kTracks - 1);
                 if (e.note == 1) gain1_[tr] = std::pow((float)e.velocity / 127.0f, 1.5f);
                 else if (e.note == 11) gain11_[tr] = (float)e.velocity / 127.0f;
+                else if (e.note == 128) bendMul_[tr] = std::pow(2.0, (e.velocity - 8192) / 8191.0 * vw->bendRange / 12.0);
             } else {
                 startVoice(e, click, spt);
             }
@@ -505,7 +514,7 @@ void StbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&
                 else { v.env -= 1.0f / 1800.0f; if (v.env <= 0) { v.on = false; continue; } }
                 out += std::sin((float)v.phase) * v.env * v.amp * cur_[v.track];
             }
-            v.phase += v.inc;
+            v.phase += v.inc * (v.click ? 1.0 : bendMul_[v.track]);
             if (v.phase > 6.283185307179586) v.phase -= 6.283185307179586;
         }
         l[i] = out;

@@ -21,7 +21,7 @@ struct Transport {
 };
 
 struct Note { long long tick; int length; int note; int velocity; };
-struct Cc { long long tick; int cc; int value; };
+struct Cc { long long tick; int cc; int value; };   // cc 128 = pitch bend, value 0..16383 (8192 = centre)
 struct Track {
     std::string name;
     std::vector<Note> notes;
@@ -75,6 +75,9 @@ struct TonalSettings {
     int stepTicks = 240;            // step length when cycles == 0
     int layout = layoutChord;
     int control = ctlVelocity;      // voices layout: the bell goes to CC1 or CC11 (velocity = notes keep their own velocity)
+    bool glide = true;              // legato voices: pitch bend hides the step changes (needs a bend range on the instrument)
+    double bendRange = 0.5;         // semitones the instrument bends for a full pitch wheel throw
+    int glideShare = 100;           // glide width in percent of one step
     bool edgeFade = true;           // CC1 control: CC11 closes the voice at the edges of the range so the wrap is silent
 };
 

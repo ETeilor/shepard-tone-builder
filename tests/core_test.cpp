@@ -199,6 +199,73 @@ static TempoSettings example() {
     return s;
 }
 
+
+static void testBend() {
+    Transport tr; tr.num = 4; tr.den = 4; tr.bpm = 120;
+    TonalSettings s;
+    s.layout = layoutVoices; s.control = ctlCc1; s.articulation = artLegato;
+    s.low = 48; s.high = 96; s.stepTicks = 480; s.vmin = 20; s.vmax = 115; s.threshold = 0; s.lengthBars = 6;
+    auto bendOf = [](const Track& t) { std::vector<Cc> v; for (auto& c : t.ccs) if (c.cc == 128) v.push_back(c); return v; };
+    auto sc = buildTonal(s, tr);
+    bool all = true, rng = true, sorted = true;
+    for (auto& t : sc.tracks) {
+        auto b = bendOf(t);
+        all = all && b.size() > 100;
+        for (size_t i = 0; i < b.size(); ++i) { rng = rng && b[i].value >= 0 && b[i].value <= 16383; if (i) sorted = sorted && b[i].tick >= b[i - 1].tick; }
+    }
+    expect(all && rng && sorted, "bend: every voice track has an ordered pitch bend curve inside 14 bits");
+    // the sounding pitch (note + bend) is continuous at every step boundary of a chromatic line (steps of 1 semitone, range 0.5)
+    auto sounding = [&](const Track& t, long long tick) {
+        int note = -1; for (auto& n : t.notes) if (n.tick <= tick && tick < n.tick + 480) note = n.note;   // the latest started note
+        for (auto& n : t.notes) if (n.tick <= tick && tick < n.tick + n.length) note = n.note;
+        int bend = 8192; for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= tick) bend = c.value;
+        return note < 0 ? -1.0 : note + (bend - 8192) / 8191.0 * 0.5;
+    };
+    bool smooth = true;
+    const auto& t = sc.tracks[1];
+    for (size_t i = 1; i + 1 < t.notes.size(); ++i) {
+        if (t.notes[i].note < t.notes[i - 1].note) continue;         // the wrap is a jump on purpose
+        const long long b = t.notes[i].tick;
+        const double before = sounding(t, b - 1), after = sounding(t, b);
+        if (std::fabs(before - after) > 0.01) smooth = false;
+    }
+    expect(smooth, "bend: pitch is continuous across every step boundary (chromatic, range 0.5)");
+    // bend is neutral in the middle of a step and at the wrap
+    bool centre = true;
+    for (size_t i = 1; i + 1 < t.notes.size(); ++i) {
+        if (t.notes[i].note < t.notes[i - 1].note || t.notes[i + 1].note < t.notes[i].note) continue;
+        const long long mid = t.notes[i].tick + 240;
+        int bend = 8192; for (auto& c : t.ccs) if (c.cc == 128 && c.tick <= mid) bend = c.value;
+        // with a 100 % glide window the centre of the step is outside both windows
+        if (std::abs(bend - 8192) > 1) centre = false;
+    }
+    expect(centre, "bend: neutral in the middle of a step");
+    // switches: off, staccato, velocity control give no bend
+    auto off = s; off.glide = false;
+    auto stc = s; stc.articulation = artStaccato;
+    bool none = true;
+    for (auto* x : {&off, &stc}) for (auto& tt : buildTonal(*x, tr).tracks) none = none && bendOf(tt).empty();
+    expect(none, "bend: not written when glide is off or for staccato");
+    // steps bigger than twice the range cannot be hidden: the curve stays at the limit but within range
+    auto wide = s; wide.pitchSet = psMajor; wide.interval = 2;
+    bool lim = true;
+    for (auto& tt : buildTonal(wide, tr).tracks) for (auto& c : bendOf(tt)) lim = lim && c.value >= 0 && c.value <= 16383;
+    expect(lim, "bend: large steps stay inside the bend range");
+    // MIDI file round trip keeps the bend values
+    auto bytes = writeMidi(sc);
+    ReadResult rr;
+    expect(readMidi(bytes.data(), bytes.size(), rr), "bend: file reads back");
+    size_t nb = 0; bool same = true;
+    if (rr.tracks.size() >= 5) {
+        auto got = bendOf(Track{"", {}, rr.tracks[2].ccs});
+        auto want = bendOf(sc.tracks[1]);
+        nb = got.size();
+        same = got.size() == want.size();
+        for (size_t i = 0; same && i < got.size(); ++i) same = got[i].tick == want[i].tick && got[i].value == want[i].value;
+    } else same = false;
+    expect(same && nb > 100, "bend: MIDI file round trip keeps every pitch bend event");
+}
+
 static void testVoices() {
     Transport tr; tr.num = 4; tr.den = 4; tr.bpm = 120;
     auto base = [] {
@@ -248,7 +315,7 @@ static void testVoices() {
         bool cc1 = true, cc11 = true, rng = true;
         for (auto& t : sc.tracks) {
             int n1 = 0, n11 = 0;
-            for (auto& c : t.ccs) { if (c.cc == 1) ++n1; if (c.cc == 11) ++n11; rng = rng && c.value >= 0 && c.value <= 127 && c.tick >= 0 && c.tick <= sc.lengthTicks; if (c.cc == 1) rng = rng && c.value >= 20 && c.value <= 115; }
+            for (auto& c : t.ccs) { if (c.cc == 1) ++n1; if (c.cc == 11) ++n11; if (c.cc == 128) continue; rng = rng && c.value >= 0 && c.value <= 127 && c.tick >= 0 && c.tick <= sc.lengthTicks; if (c.cc == 1) rng = rng && c.value >= 20 && c.value <= 115; }
             cc1 = cc1 && n1 > 20; cc11 = cc11 && n11 > 5;
         }
         expect(cc1 && cc11 && rng, "voices: CC1 curve, CC11 edge fade and value ranges");
@@ -265,7 +332,7 @@ static void testVoices() {
         auto s3 = s; s3.control = ctlCc11;
         auto sc3 = buildTonal(s3, tr);
         int zero = 0, only11 = 1;
-        for (auto& c : sc3.tracks[0].ccs) { if (c.value == 0) ++zero; if (c.cc != 11) only11 = 0; }
+        for (auto& c : sc3.tracks[0].ccs) { if (c.cc == 128) continue; if (c.value == 0) ++zero; if (c.cc != 11) only11 = 0; }
         expect(zero > 0 && only11, "voices: CC11 carrier reaches zero and writes only CC11");
         // edge fade off: no CC11
         auto s4 = s; s4.edgeFade = false;
@@ -305,7 +372,7 @@ static void testVoices() {
         auto s = base(); s.control = ctlVelocity; s.lengthBars = 6;
         auto sc = buildTonal(s, tr);
         bool noCc = true, vary = false;
-        for (auto& t : sc.tracks) { noCc = noCc && t.ccs.empty(); for (auto& n : t.notes) if (n.velocity != t.notes[0].velocity) vary = true; }
+        for (auto& t : sc.tracks) { { bool nb = true; for (auto& c : t.ccs) nb = nb && c.cc == 128; noCc = noCc && nb; } for (auto& n : t.notes) if (n.velocity != t.notes[0].velocity) vary = true; }
         expect(noCc && vary, "voices: velocity carrier has no controllers and varying velocity");
     }
     // degenerate input
@@ -463,6 +530,7 @@ static void testMidi() {
 int main() {
     testTonal();
     testVoices();
+    testBend();
     testTempo();
     testMidi();
     std::printf("%d checks, %d failed\n", checks, failures);

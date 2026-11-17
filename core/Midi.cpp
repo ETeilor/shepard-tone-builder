@@ -63,7 +63,8 @@ std::vector<unsigned char> writeMidi(const Score& sc) {
         for (const auto& e : ev) {
             putVlq(t, (unsigned)(e.tick - last));
             last = e.tick;
-            if (e.order == 1) { t.push_back(0xB0); t.push_back((unsigned char)e.a); t.push_back((unsigned char)e.b); }
+            if (e.order == 1 && e.a == 128) { t.push_back(0xE0); t.push_back((unsigned char)(e.b & 0x7F)); t.push_back((unsigned char)((e.b >> 7) & 0x7F)); }
+            else if (e.order == 1) { t.push_back(0xB0); t.push_back((unsigned char)e.a); t.push_back((unsigned char)e.b); }
             else { t.push_back(e.order ? 0x90 : 0x80); t.push_back((unsigned char)e.a); t.push_back((unsigned char)e.b); }
         }
         putVlq(t, (unsigned)std::max(0LL, sc.lengthTicks - last));
@@ -127,6 +128,7 @@ bool readMidi(const unsigned char* d, size_t size, ReadResult& out) {
                     auto& v = open[d[q]];
                     if (!v.empty()) { rt.notes.push_back({v.front().tick, (int)(tick - v.front().tick), d[q], v.front().vel}); v.erase(v.begin()); }
                 } else if (kind == 0xB0) rt.ccs.push_back({tick, d[q], d[q + 1]});
+                else if (kind == 0xE0) rt.ccs.push_back({tick, 128, d[q] | (d[q + 1] << 7)});
                 q += (size_t)need;
             }
         }

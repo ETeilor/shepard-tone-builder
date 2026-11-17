@@ -49,7 +49,7 @@ jobs:
           auval -v aumu Shpd Tlrm
 
       - name: Installer (.pkg and .dmg)
-        run: bash scripts/make_installer.sh 0.2.0
+        run: bash scripts/make_installer.sh 0.2.1
 
       - name: Install the package the way a user does and validate the installed AU
         run: |

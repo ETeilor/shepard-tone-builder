@@ -82,6 +82,24 @@ int main(int argc, char** argv) {
         expect(p.view()->score.tracks.size() == 6, "layers parameter");
     }
 
+    std::cout << "pitch glide\n";
+    {
+        StbProcessor p;
+        p.prepareToPlay(sr, 512);
+        auto bends = [&] { size_t n = 0; for (auto& t : p.view()->score.tracks) for (auto& c : t.ccs) if (c.cc == 128) ++n; return n; };
+        auto ts = p.tonalSettings();
+        expect(ts.glide && std::fabs(ts.bendRange - 0.5) < 1e-6 && ts.glideShare == 100, "glide defaults: on, half a semitone, 100 %");
+        expect(bends() > 400 && std::fabs(p.view()->bendRange - 0.5) < 1e-6, "default build writes pitch bend on the voice tracks");
+        set(p, "t_glide", 0);
+        expect(bends() == 0, "glide off: no pitch bend");
+        set(p, "t_glide", 1);
+        set(p, "t_art", 0);
+        expect(bends() == 0, "staccato: no pitch bend");
+        set(p, "t_art", 1);
+        set(p, "t_bend", 2.0f);
+        expect(std::fabs(p.view()->bendRange - 2.0) < 1e-6 && bends() > 0, "bend range follows the parameter");
+    }
+
     std::cout << "tonal profiles\n";
     {
         StbProcessor p;
@@ -96,8 +114,8 @@ int main(int argc, char** argv) {
         expect(prof() == 2 && ts.control == shp::ctlCc11 && !ts.edgeFade, "profile strings CC11");
         p.rebuild();
         bool only11 = true;
-        for (auto& t : p.view()->score.tracks) for (auto& c : t.ccs) if (c.cc != 11) only11 = false;
-        expect(only11, "CC11 profile writes only CC11");
+        for (auto& t : p.view()->score.tracks) for (auto& c : t.ccs) if (c.cc != 11 && c.cc != 128) only11 = false;
+        expect(only11, "CC11 profile writes only CC11 and pitch bend");
         set(p, "t_vmax", 100);
         expect(prof() == 3, "editing a hidden value turns the profile into Custom");
         set(p, "t_profile", 1);

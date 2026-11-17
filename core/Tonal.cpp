@@ -104,6 +104,9 @@ Score buildVoices(TonalSettings s, const Transport& tr) {
     const int ccNum = s.control == ctlCc11 ? 11 : 1;
     const int gate = s.gatePct > 0 ? clampInt(s.gatePct, 10, 200) : 0;
     const long long overlap = std::min<long long>(st / 4, 30);
+    const bool bend = s.glide && s.articulation == artLegato && gate == 0 && s.bendRange > 0.0;
+    const double R = std::max(0.05, std::min(24.0, s.bendRange));
+    const int glidePct = clampInt(s.glideShare, 10, 200);
 
     auto fold = [&](long long P, int k) { return s.low + (int)(((P + 12LL * k - s.low) % span + span) % span); };
     auto level = [&](double a) {   // controller value for a bell amplitude
@@ -116,11 +119,11 @@ Score buildVoices(TonalSettings s, const Transport& tr) {
     for (int k = 0; k < N && sc.noteCount() < (size_t)kMaxNotes; ++k) {
         Track t;
         t.name = what + " " + std::to_string(k + 1) + (s.control == ctlCc1 ? " CC1" : s.control == ctlCc11 ? " CC11" : " vel");
-        std::vector<int> pos((size_t)G + 1);
-        for (long long g = 0; g <= G; ++g) pos[(size_t)g] = fold(loopPitch(s, g), k);
+        std::vector<int> pos((size_t)G + 2);   // pos[g + 1] is the pitch of step g, g = -1..G
+        for (long long g = -1; g <= G; ++g) pos[(size_t)(g + 1)] = fold(loopPitch(s, g), k);
         for (long long g = 0; g < G; ++g) {
             const long long t0 = g * st;
-            const int p = pos[(size_t)g], pn = pos[(size_t)g + 1];
+            const int p = pos[(size_t)g + 1], pn = pos[(size_t)g + 2];
             const bool wraps = s.direction == dirDown ? pn > p : pn < p;
             long long len = st;
             if (gate > 0) len = std::max(1LL, st * gate / 100);
@@ -137,7 +140,7 @@ Score buildVoices(TonalSettings s, const Transport& tr) {
         }
         if (cc) {
             // the bell is sampled at the middle of every step and joined by straight lines
-            auto amp = [&](long long g) { g = g < 0 ? 0 : g >= G ? G - 1 : g; return tonalBellF(s, pos[(size_t)g]); };
+            auto amp = [&](long long g) { g = g < 0 ? 0 : g >= G ? G - 1 : g; return tonalBellF(s, pos[(size_t)g + 1]); };
             const long long ci = std::max<long long>(6, std::min<long long>(60, st / 8));
             int last1 = -1, last11 = -1;
             for (long long tick = 0; tick <= regionTicks; tick += ci) {
@@ -153,12 +156,43 @@ Score buildVoices(TonalSettings s, const Transport& tr) {
                 }
             }
         }
+        if (bend) {
+            // sounding target D(t) glides between neighbouring pitches around every step boundary,
+            // the bend is the distance from the note that is playing, limited to the bend range
+            const long long w = std::max<long long>(2, st * glidePct / 100);
+            auto P = [&](long long g) { return pos[(size_t)(g + 1)]; };   // g >= -1
+            auto wrapAt = [&](long long j) { const int a = P(j - 1), b = P(j); return s.direction == dirDown ? b > a : b < a; };
+            auto value = [&](long long tick) {
+                const long long g = floorDiv(tick, st);
+                const long long j = floorDiv(tick + st / 2, st);
+                double d = P(g);
+                const long long lo = j * st - w / 2, hi = lo + w;
+                if (j >= 0 && j <= G && tick >= lo && tick < hi && !wrapAt(j))
+                    d = P(j - 1) + (double)(P(j) - P(j - 1)) * ((double)(tick - lo) / (double)w);
+                const double b = std::max(-R, std::min(R, d - P(g)));
+                return clampInt(8192 + (int)std::lround(b / R * 8191.0), 0, 16383);
+            };
+            std::vector<long long> ticks;
+            const long long bi = std::max<long long>(6, std::min<long long>(60, st / 8));
+            for (long long tick = 0; tick <= regionTicks; tick += bi) ticks.push_back(tick);
+            for (long long j = 0; j <= G; ++j) {
+                const long long b0 = j * st;
+                for (long long x : {b0 - w / 2, b0 - 1, b0, b0 + w / 2 - 1}) if (x >= 0 && x <= regionTicks) ticks.push_back(x);
+            }
+            std::sort(ticks.begin(), ticks.end());
+            ticks.erase(std::unique(ticks.begin(), ticks.end()), ticks.end());
+            int lastB = -1;
+            for (long long tick : ticks) {
+                const int v = value(tick);
+                if (v != lastB) { t.ccs.push_back({tick, 128, v}); lastB = v; }
+            }
+        }
         tidyTrack(t, regionTicks);
         sc.tracks.push_back(std::move(t));
     }
     sc.name = what;
     sc.info = what + ", " + std::to_string(N) + " voices, step " + std::to_string((long long)st) + " ticks, " +
-              std::to_string(s.lengthBars) + " bars" + (s.control == ctlCc1 ? ", CC1 + CC11 edges" : s.control == ctlCc11 ? ", CC11" : "");
+              std::to_string(s.lengthBars) + " bars" + (s.control == ctlCc1 ? ", CC1 + CC11 edges" : s.control == ctlCc11 ? ", CC11" : "") + (bend ? ", pitch bend" : "");
     return sc;
 }
 }  // namespace

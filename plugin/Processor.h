@@ -21,6 +21,7 @@ struct View {
     int voices = 0;                     // tonal, voices layout
     long long cycleTicks = 0;           // tonal: one loop at the chosen step
     int bars = 0;                       // tonal: region length after rounding to whole loops
+    double bendRange = 0.5;             // semitones of a full pitch wheel throw, for the preview
     bool closed = true;                 // tonal: the region holds whole loops
 };
 
@@ -97,6 +98,7 @@ private:
     Voice voices_[64];
     static constexpr int kTracks = 16;
     float gain1_[kTracks], gain11_[kTracks], cur_[kTracks];
+    double bendMul_[kTracks];
     double sampleRate_ = 44100;
     double tick_ = 0;
     int voiceAge_ = 0;

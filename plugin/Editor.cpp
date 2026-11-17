@@ -257,7 +257,7 @@ StbEditor::StbEditor(StbProcessor& p)
         addAndMakeVisible(b);
     };
     tab(tabTonal, "Тональный", 0, "Бесконечно растущая или падающая нота: октавные голоса с колоколом громкости");
-    tab(tabTempo, "Темповой", 1, "Бесконечное ускорение или замедление: слои одного ритма и огибающая громкости, темп проекта не меняется");
+    tab(tabTempo, "Ритмический", 1, "Бесконечное ускорение или замедление: слои одного ритма и огибающая громкости, темп проекта не меняется");
 
     // ================= tonal, main
     addCombo("Профиль", "t_profile", {"Синтезатор (velocity)", "Струнные легато, CC1", "Струнные легато, CC11", "Свой"}, 1,
@@ -293,6 +293,10 @@ StbEditor::StbEditor(StbProcessor& p)
     rows.getLast()->slider->setNumDecimalPlacesToDisplay(2);
     addSlider("Порог velocity", "t_thr", 1, U("Для velocity: ноты тише этого не пишутся"), 1);
     addToggle("Тихие края через CC11", "t_edge", 1, U("CC1: контроллер 11 закрывает голос на краях диапазона, чтобы скачок вниз и вверх был беззвучным"), 1);
+    addToggle("Питчбенд между нотами", "t_glide", 1, U("Только легато и голоса: плавный сдвиг высоты прячет смену нот. В инструменте должен быть включён питчбенд с тем же диапазоном"), 1);
+    addSlider("Диапазон бенда, полутонов", "t_bend", 1, U("Диапазон питчбенда инструмента. У BBCSO Core это полтона"), 1);
+    rows.getLast()->slider->setNumDecimalPlacesToDisplay(1);
+    addSlider("Ширина глайда, %", "t_glideShare", 1, U("Какую часть шага занимает сдвиг высоты. 100 = центр на границе нот"), 1);
     addSlider("Velocity нот", "t_ccVel", 1, U("Velocity нот, когда громкость идёт контроллером"), 1);
 
     // ================= tempo, main
@@ -350,7 +354,7 @@ StbEditor::StbEditor(StbProcessor& p)
 
     play.setButtonText(U("Слушать"));
     play.getProperties().set("icon", "play");
-    play.setTooltip(U("Прослушать регион: синусом для тонального режима (с той же огибающей, что уйдёт в файл), кликом для темпового"));
+    play.setTooltip(U("Прослушать регион: синусом для тонального режима (с той же огибающей, что уйдёт в файл), кликом для ритмического"));
     play.onClick = [this]() {
         const bool on = !proc.isPreviewing();
         proc.setPreview(on);
@@ -410,6 +414,8 @@ bool StbEditor::rowApplies(const Row& r) const {
         if (r.id == "t_tonic") return pv("t_set") != 0;
         if (r.id == "t_thr") return !voices && ctl == 0;
         if (r.id == "t_edge") return voices && ctl == 1;
+        if (r.id == "t_glide") return voices && pv("t_art") == 1;
+        if (r.id == "t_bend" || r.id == "t_glideShare") return voices && pv("t_art") == 1 && pv("t_glide") == 1;
         if (r.id == "t_ccVel") return voices && ctl != 0;
         if (r.id == "t_vmin") return ctl != 2;
     } else {

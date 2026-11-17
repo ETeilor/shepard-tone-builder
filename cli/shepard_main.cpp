@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
         const std::string ct = str("control", "vel");
         s.control = ct == "cc1" ? ctlCc1 : ct == "cc11" ? ctlCc11 : ctlVelocity;
         s.edgeFade = num("edge", 1) != 0;
+        s.glide = num("glide", 1) != 0;
+        s.bendRange = num("bend", 0.5);
+        s.glideShare = (int)num("share", 100);
         if (s.layout == layoutVoices && num("whole", 1) != 0) s.lengthBars = tonalWholeCycleBars(s, tr, s.lengthBars);
         sc = buildTonal(s, tr);
     } else if (mode == "tempo") {
